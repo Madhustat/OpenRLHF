@@ -147,7 +147,7 @@ class ActorPPOTrainer(ABC):
             self._model_update_group = group_name
         else:
             self._model_update_group = stateless_init_process_group(
-                master_address, master_port, 0, world_size, torch.cuda.current_device()
+                master_address, master_port, 0, world_size, torch.accelerator.current_accelerator()
             )
 
         ray.get(refs)
@@ -170,7 +170,7 @@ class ActorPPOTrainer(ABC):
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_accelerator()
 
         status_list = []
         status_mean = {}
@@ -413,7 +413,7 @@ class ActorPPOTrainer(ABC):
             for engine in self.vllm_engines:
                 cache_reset_refs.append(engine.reset_prefix_cache.remote())
 
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         model = self.actor.model.module
         count = 0
 
@@ -432,7 +432,11 @@ class ActorPPOTrainer(ABC):
 
                     collective.broadcast(param.data, 0, group_name=self._model_update_group)
                 else:
-                    self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                    # PyNcclCommunicator.broadcast() mutates in-place and returns the same
+                    # tensor; the XPU fallback (gloo-based, see distributed_util.py)
+                    # returns a NEW tensor instead - capture the return value so both
+                    # paths work correctly.
+                    param.data = self._model_update_group.broadcast(param.data, src=0)
                 ray.get(refs)
 
         def _handle_cuda_ipc(param, count, num_params):
@@ -485,7 +489,7 @@ class ActorPPOTrainer(ABC):
 
         if cache_reset_refs:
             ray.get(cache_reset_refs)
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         torch_dist_barrier_and_cuda_sync()
 
 
@@ -500,7 +504,9 @@ class PolicyModelActor(BaseModelActor):
 
         # Skip for vLLM >= 0.16 where NCCL_CUMEM_ENABLE=0 causes ncclCommInitRank to fail
         # with "unhandled cuda error" under NCCL 2.27+.
-        if getattr(args.vllm, "sync_backend", "nccl") == "nccl":
+        # Only relevant when vLLM engines are actually in use - vllm may not be
+        # installed at all when running with --vllm.num_engines 0.
+        if vllm_engines and getattr(args.vllm, "sync_backend", "nccl") == "nccl":
             import vllm
             from packaging import version as pkg_version
 
@@ -596,12 +602,12 @@ class PolicyModelActor(BaseModelActor):
 
     def fit(self, kl_ctl: float = 0):
         """Train actor model with the replay buffer."""
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         self.actor.train()
         status = self.trainer.ppo_train(kl_ctl)
         self.trainer.replay_buffer.clear()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()
+        torch.accelerator.synchronize()
         return status
 
     def save_model(self):
@@ -623,7 +629,7 @@ class PolicyModelActor(BaseModelActor):
         mm_train_inputs_list=None,
     ) -> torch.Tensor:
         """Generates actor values."""
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_accelerator()
 
         # VLM: merge pre-processed multimodal inputs from all samples in batch
         mm_inputs = {}

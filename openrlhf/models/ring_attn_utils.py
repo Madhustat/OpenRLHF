@@ -1,9 +1,42 @@
 import torch
 import torch.distributed as dist
-from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
-from flash_attn.utils.distributed import all_gather
+from einops import rearrange
+from transformers.modeling_flash_attention_utils import (
+    _index_first_axis as index_first_axis,
+    _pad_input as pad_input,
+    _unpad_input as unpad_input,
+)
 
 RING_ATTN_GROUP = None
+
+
+class _AllGatherFunc(torch.autograd.Function):
+    """Minimal replacement for flash_attn.utils.distributed.all_gather.
+
+    transformers does not ship a replacement for this one (only the padding
+    helpers above), so it stays vendored here. Pure torch.distributed, no
+    CUDA-specific code - see MASTER_setup_and_fixes_guide.md Part 3.1.
+    """
+
+    @staticmethod
+    def forward(ctx, input_, process_group):
+        ctx.process_group = process_group
+        world_size = dist.get_world_size(process_group)
+        output = torch.empty(world_size * input_.shape[0], *input_.shape[1:], dtype=input_.dtype, device=input_.device)
+        dist.all_gather_into_tensor(output, input_.contiguous(), group=process_group)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        world_size = dist.get_world_size(ctx.process_group)
+        grad_input = torch.empty(
+            grad_output.shape[0] // world_size, *grad_output.shape[1:], dtype=grad_output.dtype, device=grad_output.device
+        )
+        dist.reduce_scatter_tensor(grad_input, grad_output.contiguous(), group=ctx.process_group)
+        return grad_input, None
+
+
+all_gather = _AllGatherFunc.apply
 
 
 def patch_transformers_for_ring_flash_attn():
@@ -40,7 +73,7 @@ def reset_ring_attn_position_ids(start, end, packed_seq_lens):
         end: the end position
         packed_seq_lens: the sequence lengths of packed sequences
     """
-    position_ids = torch.zeros((1, end - start), dtype=torch.long, device=torch.cuda.current_device())
+    position_ids = torch.zeros((1, end - start), dtype=torch.long, device=torch.accelerator.current_accelerator())
     offset = 0
     for seqlen in packed_seq_lens:
         seq_start = max(offset, start)
