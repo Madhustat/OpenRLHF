@@ -15,9 +15,14 @@ compatible, zero behavior change there) and `"xpu"` here. A few changes are a di
 (optional-dependency import ordering, a broadcast-communicator fallback) — those are called out
 explicitly.
 
-**18 files modified, 2 new test files added.** Nothing in this list is a workaround that needs
+**19 files modified, 2 new test files added.** Nothing in this list is a workaround that needs
 to be reverted later — every change here is either a genuine bug fix (works correctly on CUDA
 too) or a necessary device-generic replacement.
+
+> **Update 2026-07-20:** items 15–16 add the 2-GPU device-isolation and LoRA-merge fixes
+> (`vllm_engine.py` is new to this list; `ppo_actor.py` was already item 8). For the full
+> multi-GPU / LoRA / ZeRO-3 / single-GPU-colocation runbook, required launch flags, and the
+> verified capability matrix, see the companion `MULTIGPU_LORA_ZERO3_fixes_and_flags.md`.
 
 ---
 
@@ -423,6 +428,56 @@ relying on that setup step being documented, rather than keeping a dedicated tes
 you want that regression guard back, its logic is straightforward to reconstruct: real
 `init_process_group(backend="xccl")` + `all_reduce()` on a real XPU tensor, single process is
 sufficient since the failure occurs at initialization, before rank count matters.
+
+---
+
+## 15. `openrlhf/trainer/ray/vllm_engine.py` — pin vLLM engine to its XPU (2-GPU isolation)
+
+Multi-GPU only, and only when `RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1` is set (the
+`ray_noset_visible_devices()` branch of `_configure_device_env`). On XPU, Ray cannot mask devices
+early enough (it sets `ONEAPI_DEVICE_SELECTOR` inside the already-started worker, after Level-Zero
+is initialized), and vLLM's XPU platform reads `ZE_AFFINITY_MASK`, not `CUDA_VISIBLE_DEVICES`
+(`vllm/platforms/xpu.py`: `device_control_env_var = "ZE_AFFINITY_MASK"`). Without this, the actor
+and the vLLM engine both land on physical `xpu:0` and OOM on weight broadcast.
+
+```python
+# BEFORE (_configure_device_env, NOSET branch):
+os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
+# AFTER:
+gpu_id = str(ray.get_gpu_ids()[0])
+os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+os.environ["ZE_AFFINITY_MASK"] = gpu_id   # XPU reads this; harmless/ignored on CUDA
+```
+CUDA-safe: `ZE_AFFINITY_MASK` is simply an unused env var on NVIDIA. Only sets a single id
+(correct for `tensor_parallel_size == 1`; TP>1 would need the full comma-list). Full rationale,
+required launch env var, and the verified capability matrix: see
+`MULTIGPU_LORA_ZERO3_fixes_and_flags.md`.
+
+## 16. `openrlhf/trainer/ray/ppo_actor.py` — LoRA merge before broadcast to vLLM
+
+Only active for LoRA runs (`--ds.lora.rank > 0`, i.e. `model` is a `PeftModel`); full
+fine-tuning is unchanged (takes the original `else` branch). Fixes `ValueError: no module or
+parameter named 'base_model'` on weight sync (OpenRLHF issue #991). PEFT names params
+`base_model.model…` and keeps adapter deltas separate; vLLM expects merged `model.layers…`
+weights. Restores the approach from OpenRLHF's own closed PR #869, adapted to the current code.
+
+```python
+# broadcast_to_vllm(), core of the change:
+#   if isinstance(model, PeftModel):
+#       base = model.base_model.model                 # strip `base_model.` prefix
+#       for each leaf module (via new _get_leaf_modules helper):
+#           if LoRA layer: GatheredParameters(if ZeRO-3) -> module.merge(safe_merge=True)
+#                          -> _replace_module onto fake parent -> broadcast merged weights
+#                          -> module.unmerge() on exit (ExitStack)
+#           else: broadcast as-is
+#   else:
+#       <unchanged original per-param broadcast>
+```
+Also adds a `_get_leaf_modules(root, use_lora)` method (returns leaf/LoRA-wrapped modules, wraps
+isolated params, skips `lora_`/`base_layer` bookkeeping). Uses `peft` APIs `_replace_module`,
+`merge`, `unmerge`, `get_base_layer` (present in peft 0.19.1). Verified: LoRA rank 32, 8 steps,
+`base_model` error gone; full-FT regression run still passes. Details:
+`MULTIGPU_LORA_ZERO3_fixes_and_flags.md`.
 
 ---
 

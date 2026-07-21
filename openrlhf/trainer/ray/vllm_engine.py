@@ -77,10 +77,17 @@ class RolloutRayActor:
             os.environ.pop("ROCR_VISIBLE_DEVICES", None)
             os.environ.pop("HIP_VISIBLE_DEVICES", None)
         elif ray_noset_visible_devices():
-            # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
+            # We need to set the visible-device env var to the ray assigned GPU
             # when the distributed_executor_backend is not ray and
             # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
+            gpu_id = str(ray.get_gpu_ids()[0])
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+            # On Intel XPU, vLLM reads ZE_AFFINITY_MASK (see vllm XPUPlatform.
+            # device_control_env_var), not CUDA_VISIBLE_DEVICES. Set it here,
+            # before the Level-Zero runtime initializes, so this engine is pinned
+            # to its assigned physical XPU instead of defaulting to xpu:0. Harmless
+            # on non-XPU backends (ignored). Must be set before any torch.xpu call.
+            os.environ["ZE_AFFINITY_MASK"] = gpu_id
 
         if bundle_indices is not None:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
