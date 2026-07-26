@@ -5,8 +5,9 @@ one pipeline for reinforcement-learning post-training (the technique behind alig
 We have brought that full Ray + vLLM + DeepSpeed stack to Intel XPU — running on the same code
 NVIDIA users run.
 
-**Goal:** Enable OpenRLHF's Ray, vLLM, and DeepSpeed workflows on Intel XPU through
-upstream-friendly, device-agnostic changes, while preserving existing NVIDIA/CUDA behavior.
+**Goal:** Make OpenRLHF's full training loop run on Intel XPU — orchestration (Ray), rollout
+generation (vLLM), and distributed training (DeepSpeed) working together on Intel hardware —
+through upstream-friendly, device-agnostic changes that preserve existing NVIDIA/CUDA behavior.
 
 ---
 
