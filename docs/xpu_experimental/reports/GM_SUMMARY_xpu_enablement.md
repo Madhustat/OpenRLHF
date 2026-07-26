@@ -28,17 +28,6 @@ upstream-friendly, device-agnostic changes, while preserving existing NVIDIA/CUD
 
 ---
 
-## What we achieved
-
-- **OpenRLHF now runs on Intel XPU.** All major RLHF training workflows were smoke-tested and
-  run end-to-end on XPU.
-- **NVIDIA is unaffected.** The changes are device-agnostic — the same code adapts to the
-  hardware automatically, so NVIDIA users see no change and Intel gains support.
-- **3 PRs submitted upstream**, each backed by automated tests.
-- **Unit tests: 100% pass** on the XPU-runnable suite.
-
----
-
 ## Unit tests at a glance
 
 | | Count |
