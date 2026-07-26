@@ -24,7 +24,7 @@ from transformers.trainer import get_scheduler
 from openrlhf.models import Actor
 from openrlhf.models.ring_attn_utils import get_ring_attn_group, set_ring_attn_group
 from openrlhf.utils.distributed_sampler import DistributedSampler
-from openrlhf.utils.distributed_util import torch_dist_barrier_and_cuda_sync
+from openrlhf.utils.distributed_util import torch_dist_barrier_and_accelerator_sync
 
 from .deepspeed_utils import (
     _z3_params_to_fetch,
@@ -594,7 +594,7 @@ class DeepspeedStrategy(ABC):
 
         gc.collect()
 
-        torch_dist_barrier_and_cuda_sync()
+        torch_dist_barrier_and_accelerator_sync()
 
     def all_reduce(self, data, op="mean"):
         assert op in ("mean", "max", "sum")
@@ -611,7 +611,7 @@ class DeepspeedStrategy(ABC):
             is_cpu_tensor = data.device.type == "cpu"
 
             if is_cpu_tensor:
-                data = data.to(torch.accelerator.current_accelerator())
+                data = data.to(torch.accelerator.current_device_index())
             if op == "mean":
                 data /= self.world_size
             dist.all_reduce(data, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
@@ -630,8 +630,8 @@ class DeepspeedStrategy(ABC):
                 data = torch.Tensor([data])
             is_cpu_tensor = data.device.type == "cpu"
 
-            ret = [torch.zeros_like(data).to(torch.accelerator.current_accelerator()) for _ in range(self.world_size)]
-            dist.all_gather(ret, data.to(torch.accelerator.current_accelerator()))
+            ret = [torch.zeros_like(data).to(torch.accelerator.current_device_index()) for _ in range(self.world_size)]
+            dist.all_gather(ret, data.to(torch.accelerator.current_device_index()))
             return torch.cat(ret).cpu() if is_cpu_tensor else torch.cat(ret)
 
     def print(self, *msg):
@@ -754,7 +754,7 @@ class DeepspeedStrategy(ABC):
                     shutil.rmtree(delete_dir)
                     self.print(f"Deleted checkpoint {delete_dir} ({reason})")
 
-        torch_dist_barrier_and_cuda_sync()
+        torch_dist_barrier_and_accelerator_sync()
         model.save_checkpoint(save_dir, tag=tag, client_state=client_state, save_latest=save_latest)
 
         # Write metric after successful save to avoid orphaned metric files on crash.

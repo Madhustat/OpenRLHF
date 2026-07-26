@@ -80,7 +80,7 @@ class CriticPPOTrainer(ABC):
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
-        device = torch.accelerator.current_accelerator()
+        device = torch.accelerator.current_device_index()
 
         status_list = []
         status_mean = {}
@@ -266,7 +266,7 @@ class CriticModelActor(BaseModelActor):
         packed_seq_lens=None,
     ) -> torch.Tensor:
         """Generates critic values."""
-        device = torch.accelerator.current_accelerator()
+        device = torch.accelerator.current_device_index()
         self.critic.eval()
         with torch.no_grad():
             value = self.critic(

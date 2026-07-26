@@ -11,6 +11,7 @@ class WorkerWrap:
 
         rank = torch.distributed.get_rank() + rank_offset
         self._model_update_with_ray = use_ray
+        self._sync_backend = backend
         if use_ray:
             import ray.util.collective as collective
 
@@ -23,6 +24,7 @@ class WorkerWrap:
                 rank,
                 world_size,
                 self.device,
+                backend=backend,
             )
         print(
             f"init_process_group: master_address={master_address}, master_port={master_port}, ",
@@ -37,17 +39,17 @@ class WorkerWrap:
             print(f"update weight: {name}, dtype: {dtype}, shape: {shape}")
 
         assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-        weight = torch.empty(shape, dtype=dtype, device=torch.accelerator.current_accelerator())
+        # self.device identifies both the accelerator type and index (unlike a bare int index).
+        weight = torch.empty(shape, dtype=dtype, device=self.device)
         if self._model_update_with_ray:
             import ray.util.collective as collective
 
             collective.broadcast(weight, 0, group_name=self._model_update_group)
         else:
-            # PyNcclCommunicator.broadcast() mutates `weight` in-place and returns the
-            # same tensor; the XPU fallback (gloo-based, see distributed_util.py)
-            # returns a NEW tensor instead - capture the return value so the received
-            # data is actually used on both paths.
-            weight = self._model_update_group.broadcast(weight, src=0)
+            # Preserve the explicit CUDA stream on the NCCL path; the gloo fallback accepts
+            # stream=None and ignores it. Both broadcast into `weight` in place.
+            stream = torch.cuda.current_stream() if self._sync_backend == "nccl" else None
+            self._model_update_group.broadcast(weight, src=0, stream=stream)
 
         self.model_runner.model.load_weights(weights=[(name, weight)])
 

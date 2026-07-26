@@ -15,6 +15,7 @@ from openrlhf.trainer.ppo_utils.experience_maker import RemoteExperienceMaker
 from openrlhf.trainer.ppo_utils.kl_controller import AdaptiveKLController, FixedKLController
 from openrlhf.trainer.ppo_utils.samples_generator import SamplesGenerator
 from openrlhf.trainer.ray.launcher import RayActorGroup
+from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 from openrlhf.utils.deepspeed import DeepspeedStrategy
 from openrlhf.utils.logging_utils import TensorboardLogger, WandbLogger, init_logger
 from openrlhf.utils.utils import get_tokenizer
@@ -308,8 +309,6 @@ class BasePPOTrainer(ABC):
         simultaneous allocation of both weights and KV cache.
         """
         if self.args.vllm.enable_sleep:
-            from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
-
             # Wake up only weights for weight sync (not KV cache)
             # This avoids allocating KV cache memory during weight update
             batch_vllm_engine_call(self.vllm_engines, "wake_up", tags=["weights"])

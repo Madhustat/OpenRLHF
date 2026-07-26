@@ -1,0 +1,88 @@
+###############################################################################
+# vLLM device-pinning proof - output capture
+# Host: real dual Intel XPU box (spr818157, user sdp)
+# Repo: /home/sdp/madhu/openrlhf_exp/OpenRLHF   venv-tf (python 3.13)
+# Date: 2026-07-23
+# Script: tools/prove_device_pinning_realray.py  (PROVE_NUM_GPUS not needed - 2 real XPUs)
+###############################################################################
+
+=================== SCRIPT: prove_device_pinning_realray.py ===================
+$ ray start --head --num-gpus=2
+$ python tools/prove_device_pinning_realray.py
+
+### backend='mp': launching 2 actor(s) concurrently
+
+------------------------------------------------------------------------------
+actor 0  backend='mp'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [1]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '1'}
+    _configure_device_env(backend='mp') -> ok
+    env AFTER : {'CUDA_VISIBLE_DEVICES': '1'}
+
+------------------------------------------------------------------------------
+actor 1  backend='mp'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [0]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '0'}
+    _configure_device_env(backend='mp') -> ok
+    env AFTER : {'CUDA_VISIBLE_DEVICES': '0'}
+
+  GPUs assigned across actors: [0, 1]  ->  DISTINCT (no collision)
+
+### backend='ray': launching 2 actor(s) concurrently
+
+------------------------------------------------------------------------------
+actor 0  backend='ray'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [0]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '0'}
+    _configure_device_env(backend='ray') -> ok
+    env AFTER : (none set)
+
+------------------------------------------------------------------------------
+actor 1  backend='ray'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [1]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '1'}
+    _configure_device_env(backend='ray') -> ok
+    env AFTER : (none set)
+
+
+###############################################################################
+# DIAGNOSIS
+###############################################################################
+
+WHAT THIS RUN PROVES
+  * Real dual-XPU host: Ray detected 2 XPUs and assigned two DIFFERENT physical
+    devices to the two concurrent actors - get_gpu_ids() = [1] and [0]
+    (order is just Ray's scheduling; both devices covered, no collision).
+  * Platform resolves to XPUPlatform with device_control_env_var = 'ZE_AFFINITY_MASK'
+    on real Intel hardware, via vLLM's abstraction (no vendor if/else in OpenRLHF).
+  * backend='ray' branch clears the inherited visibility pin (env AFTER = none set)
+    so vLLM's own ray executor can assign devices to its child workers.
+
+WHAT THIS RUN DOES *NOT* PROVE (important)
+  * ray_noset_visible_devices() = False in this run, so the elif branch did NOT
+    execute - i.e. ZE_AFFINITY_MASK was NOT set by OpenRLHF here. In the mp case
+    env AFTER just shows the CUDA_VISIBLE_DEVICES that Ray itself set.
+  * On XPU, vLLM reads ZE_AFFINITY_MASK, NOT CUDA_VISIBLE_DEVICES. So with
+    noset=False, Ray's CUDA_VISIBLE_DEVICES pin is not the variable vLLM honors -
+    which is exactly the gap the fix closes when noset=True.
+
+TO PROVE THE FIX ITSELF ON THIS BOX (elif branch sets ZE_AFFINITY_MASK)
+    export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
+    export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1
+    ray start --head --num-gpus=2
+    python tools/prove_device_pinning_realray.py
+  Expected: ray_noset_visible_devices()=True, and env AFTER (backend='mp') shows
+  ZE_AFFINITY_MASK set to each actor's distinct id (0 and 1).
+###############################################################################

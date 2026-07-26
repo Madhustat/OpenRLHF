@@ -133,7 +133,7 @@ class ReferenceModelActor(BaseModelActor):
         packed_seq_lens: Optional[list[int]] = None,
         mm_train_inputs_list=None,
     ) -> torch.Tensor:
-        device = torch.accelerator.current_accelerator()
+        device = torch.accelerator.current_device_index()
 
         # VLM: merge pre-processed multimodal inputs from all samples in batch
         mm_inputs = {}
@@ -187,7 +187,7 @@ class RewardModelActor(BaseModelActor):
         packed_seq_lens=None,
         pad_sequence=False,
     ) -> torch.Tensor:
-        device = torch.accelerator.current_accelerator()
+        device = torch.accelerator.current_device_index()
         with torch.no_grad():
             reward = self.model(
                 sequences.to(device),

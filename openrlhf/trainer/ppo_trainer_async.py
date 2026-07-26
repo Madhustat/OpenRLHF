@@ -8,6 +8,7 @@ from tqdm import tqdm
 from openrlhf.trainer.ppo_trainer import BasePPOTrainer, compute_eval_metrics, prepare_datasets
 from openrlhf.trainer.ppo_utils.samples_generator import SamplesGenerator
 from openrlhf.trainer.ray.launcher import RayActorGroup
+from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 from openrlhf.utils.deepspeed import DeepspeedStrategy
 from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.utils import get_tokenizer
@@ -252,8 +253,6 @@ class TrainingActor(BasePPOTrainer):
             self.tensorboard_logger.close()
 
     def broadcast_to_vllm(self):
-        from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
-
         # Lock prevents weight broadcast from overlapping with eval generation.
         ray.get(self.vllm_lock.acquire.remote())
         if self._partial_rollout:

@@ -5,6 +5,7 @@ from datetime import datetime
 import ray
 from ray.util.placement_group import placement_group
 
+from openrlhf.trainer.ray import create_vllm_engines
 from openrlhf.trainer.ray.launcher import (
     RayActorGroup,
     ReferenceModelActor,
@@ -56,8 +57,6 @@ def train(args):
     vllm_engines = None
     max_len = args.data.max_len
     if args.vllm.num_engines is not None and args.vllm.num_engines > 0:
-        from openrlhf.trainer.ray.vllm_engine import create_vllm_engines
-
         if args.train.colocate_all and not args.train.async_enable:
             assert (
                 args.actor.num_nodes * args.actor.num_gpus_per_node
@@ -242,7 +241,16 @@ if __name__ == "__main__":
         default=1,
         help="tensor parallel size of vLLM Engine for multi-GPU inference",
     )
-    parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="DeepSpeed -> vLLM weight sync backend")
+    parser.add_argument(
+        "--vllm.sync_backend",
+        choices=("nccl", "gloo"),
+        default=None,
+        help=(
+            "DeepSpeed -> vLLM weight-sync backend. Omitted/None: auto-detect "
+            "(NCCL/RCCL on CUDA/ROCm, gloo with CPU staging on Intel XPU). "
+            "'nccl': CUDA or ROCm only. 'gloo': CPU-staged, incl. Intel XPU."
+        ),
+    )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
     parser.add_argument("--vllm.enable_prefix_caching", action="store_true", default=False)
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")

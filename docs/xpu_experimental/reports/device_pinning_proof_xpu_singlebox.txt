@@ -1,0 +1,158 @@
+###############################################################################
+# vLLM device-pinning proof - output capture
+# Host: single Intel XPU box (PG16WVAW7054)
+# Date: 2026-07-23
+# venv: work2_with_transformers_native/OpenRLHF/venv-tf
+# NOTE: multi-GPU section below uses PROVE_NUM_GPUS=2 (logical Ray GPUs) to
+#       validate the distinctness LOGIC on a single-physical-GPU box.
+#       Physical two-device proof must be re-run on the real dual-GPU host.
+###############################################################################
+
+======================= SCRIPT 1: prove_device_pinning.py =====================
+$ python tools/prove_device_pinning.py
+
+==============================================================================
+PART A - real vLLM platform on this machine
+==============================================================================
+  platform               : vllm.platforms.xpu.XPUPlatform
+  device_control_env_var : 'ZE_AFFINITY_MASK'
+  ray_device_key         : 'GPU'
+
+==============================================================================
+PART B - simulated: what _configure_device_env sets per scenario
+==============================================================================
+
+------------------------------------------------------------------------------
+1. NVIDIA, single GPU, non-ray (assigned GPU 0)
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var='CUDA_VISIBLE_DEVICES'  ray_gpu_ids=[0]  noset=True  bundle_indices=None  num_gpus=1
+    AFTER :
+        CUDA_VISIBLE_DEVICES = 0
+
+------------------------------------------------------------------------------
+2. NVIDIA, multi-GPU, non-ray (assigned GPU 3 of 0-7)
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var='CUDA_VISIBLE_DEVICES'  ray_gpu_ids=[3]  noset=True  bundle_indices=None  num_gpus=1
+    AFTER :
+        CUDA_VISIBLE_DEVICES = 3
+
+------------------------------------------------------------------------------
+3. Intel XPU, single GPU, non-ray (assigned XPU 0)
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var='ZE_AFFINITY_MASK'  ray_gpu_ids=[0]  noset=True  bundle_indices=None  num_gpus=1
+    AFTER :
+        ZE_AFFINITY_MASK = 0
+
+------------------------------------------------------------------------------
+4. Intel XPU, multi-GPU, non-ray (assigned XPU 2 of 0-3)
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var='ZE_AFFINITY_MASK'  ray_gpu_ids=[2]  noset=True  bundle_indices=None  num_gpus=1
+    AFTER :
+        ZE_AFFINITY_MASK = 2
+
+------------------------------------------------------------------------------
+5. NVIDIA, ray backend (pin cleared)
+------------------------------------------------------------------------------
+    inputs: backend='ray'  platform_var='CUDA_VISIBLE_DEVICES'  ray_gpu_ids=[3]  noset=True  bundle_indices=None  num_gpus=1
+    BEFORE:
+        CUDA_VISIBLE_DEVICES = 3
+        ROCR_VISIBLE_DEVICES = 3
+    AFTER :
+        (none of the watched vars set)
+
+------------------------------------------------------------------------------
+6. Intel XPU, ray backend (pin cleared, incl. ZE_AFFINITY_MASK)
+------------------------------------------------------------------------------
+    inputs: backend='ray'  platform_var='ZE_AFFINITY_MASK'  ray_gpu_ids=[2]  noset=True  bundle_indices=None  num_gpus=1
+    BEFORE:
+        CUDA_VISIBLE_DEVICES = 2
+        ZE_AFFINITY_MASK = 2
+    AFTER :
+        (none of the watched vars set)
+
+------------------------------------------------------------------------------
+7. Intel XPU, non-ray, tensor-parallel bundle
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var='ZE_AFFINITY_MASK'  ray_gpu_ids=[1]  noset=True  bundle_indices=[4, 5]  num_gpus=2
+    AFTER :
+        ZE_AFFINITY_MASK = 1
+        VLLM_RAY_PER_WORKER_GPUS = 2
+        VLLM_RAY_BUNDLE_INDICES = 4,5
+
+------------------------------------------------------------------------------
+8. Error: Ray assigned no accelerator (empty gpu_ids)
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var='ZE_AFFINITY_MASK'  ray_gpu_ids=[]  noset=True  bundle_indices=None  num_gpus=1
+    RAISED (as intended): RuntimeError: Ray did not assign an accelerator to the vLLM actor
+
+------------------------------------------------------------------------------
+9. Error: platform declares no device-control var
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var=''  ray_gpu_ids=[0]  noset=True  bundle_indices=None  num_gpus=1
+    RAISED (as intended): RuntimeError: The active vLLM platform does not define a device-control environment variable
+
+------------------------------------------------------------------------------
+10. noset=False, non-ray (Ray manages visibility; we set nothing)
+------------------------------------------------------------------------------
+    inputs: backend='mp'  platform_var='ZE_AFFINITY_MASK'  ray_gpu_ids=[2]  noset=False  bundle_indices=None  num_gpus=1
+    BEFORE:
+        ZE_AFFINITY_MASK = already-set-by-ray
+    AFTER :
+        ZE_AFFINITY_MASK = already-set-by-ray
+
+
+=================== SCRIPT 2: prove_device_pinning_realray.py =================
+$ PROVE_NUM_GPUS=2 python tools/prove_device_pinning_realray.py
+
+==============================================================================
+REAL-RAY PROOF: run _configure_device_env inside real GPU actors
+==============================================================================
+  No running Ray found - starting a local Ray with num_gpus=2.
+  Ray GPUs available: 2
+
+### backend='mp': launching 2 actor(s) concurrently
+
+------------------------------------------------------------------------------
+actor 0  backend='mp'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [0]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '0', 'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+    _configure_device_env(backend='mp') -> ok
+    env AFTER : {'CUDA_VISIBLE_DEVICES': '0', 'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+
+------------------------------------------------------------------------------
+actor 1  backend='mp'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [1]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '1', 'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+    _configure_device_env(backend='mp') -> ok
+    env AFTER : {'CUDA_VISIBLE_DEVICES': '1', 'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+
+  GPUs assigned across actors: [0, 1]  ->  DISTINCT (no collision)
+
+### backend='ray': launching 2 actor(s) concurrently
+
+------------------------------------------------------------------------------
+actor 0  backend='ray'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [0]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '0', 'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+    _configure_device_env(backend='ray') -> ok
+    env AFTER : {'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+
+------------------------------------------------------------------------------
+actor 1  backend='ray'
+------------------------------------------------------------------------------
+    ray.get_gpu_ids()            = [1]
+    ray_noset_visible_devices()  = False
+    platform / control var       = XPUPlatform / 'ZE_AFFINITY_MASK'
+    env BEFORE: {'CUDA_VISIBLE_DEVICES': '1', 'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+    _configure_device_env(backend='ray') -> ok
+    env AFTER : {'ONEAPI_DEVICE_SELECTOR': 'level_zero:0'}
+

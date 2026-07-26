@@ -4,21 +4,37 @@ from copy import deepcopy
 from typing import Any, List, Optional
 
 import ray
-import vllm
 from packaging import version
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from vllm.inputs import TokensPrompt
-from vllm.utils import random_uuid
-
-from openrlhf.utils.agent import AgentExecutorBase, SingleTurnAgentExecutor
 
 from .utils import get_bundle_indices, ray_noset_visible_devices
 
+# Keep runtime-sensitive imports (vllm, openrlhf.utils.agent) out of module scope so accelerator
+# visibility can be configured before any dependency initializes the device runtime inside a
+# Ray actor. These are imported locally in the methods that use them, after device pinning.
 
-def _load_agent_executor(agent_func_path: str) -> AgentExecutorBase:
+
+def _resolve_device_control_env_var():
+    """Env var that controls device visibility: XPU -> ZE_AFFINITY_MASK, CUDA/ROCm ->
+    CUDA_VISIBLE_DEVICES. Reads torch.version, not vllm.platforms, to avoid initializing the
+    runtime before the device is pinned."""
+    import torch
+
+    if getattr(torch.version, "xpu", None):
+        return "ZE_AFFINITY_MASK"
+    if getattr(torch.version, "cuda", None) or getattr(torch.version, "hip", None):
+        return "CUDA_VISIBLE_DEVICES"
+    return None
+
+
+def _load_agent_executor(agent_func_path: str):
     assert agent_func_path.endswith(".py"), "Agent path must be a Python file"
+
     import importlib.util
+
+    # Local import: keeps this Ray actor module from pulling runtime-sensitive deps at import.
+    from openrlhf.utils.agent import AgentExecutorBase
 
     spec = importlib.util.spec_from_file_location("agent_module", agent_func_path)
     agent_module = importlib.util.module_from_spec(spec)
@@ -43,16 +59,23 @@ class RolloutRayActor:
         mm_pad_token_ids: Optional[set] = None,
         **kwargs,
     ):
+        # Configure device visibility before importing vLLM or other runtime-sensitive dependencies.
         self._configure_device_env(
             backend=kwargs.get("distributed_executor_backend"),
             bundle_indices=bundle_indices,
             num_gpus=kwargs.pop("num_gpus"),
         )
+        
+        # Import vLLM only after device visibility has been configured, before
+        # any dependency has an opportunity to initialize the accelerator runtime
+
+        import vllm
+
         self._configure_vllm_env(version, vllm, kwargs.pop("full_determinism", False))
 
-        # Execution mode mapping:
-        # - custom agent executor: user-provided AgentExecutorBase subclass
-        # - single-turn with optional reward: default executor
+        # Local import, deferred for the same reason as vllm above.
+        from openrlhf.utils.agent import SingleTurnAgentExecutor
+
         if agent_func_path:
             self.executor = _load_agent_executor(agent_func_path)
         else:
@@ -69,25 +92,46 @@ class RolloutRayActor:
         self._mm_pad_token_ids = mm_pad_token_ids
 
     def _configure_device_env(self, backend, bundle_indices, num_gpus):
+        # Device-visibility env var for the active platform (NVIDIA -> CUDA_VISIBLE_DEVICES,
+        # Intel XPU -> ZE_AFFINITY_MASK). Read from torch.version, not vllm.platforms, since
+        # importing vllm.platforms would initialize the runtime before pinning.
+        device_control_env_var = _resolve_device_control_env_var()
+        if not device_control_env_var:
+            raise RuntimeError("Could not determine the device-control environment variable for the active accelerator")
+
         if backend == "ray":
             # a hack to make the script work.
             # stop ray from manipulating *_VISIBLE_DEVICES
-            # at the top-level when the distributed_executor_backend is ray.
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
-            os.environ.pop("HIP_VISIBLE_DEVICES", None)
-        elif ray_noset_visible_devices():
-            # We need to set the visible-device env var to the ray assigned GPU
-            # when the distributed_executor_backend is not ray and
-            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
-            gpu_id = str(ray.get_gpu_ids()[0])
-            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
-            # On Intel XPU, vLLM reads ZE_AFFINITY_MASK (see vllm XPUPlatform.
-            # device_control_env_var), not CUDA_VISIBLE_DEVICES. Set it here,
-            # before the Level-Zero runtime initializes, so this engine is pinned
-            # to its assigned physical XPU instead of defaulting to xpu:0. Harmless
-            # on non-XPU backends (ignored). Must be set before any torch.xpu call.
-            os.environ["ZE_AFFINITY_MASK"] = gpu_id
+            # at the top-level when the distributed_executor_backend is ray, so
+            # vLLM's ray executor is free to assign devices to its child workers.
+            # ONEAPI_DEVICE_SELECTOR is cleared too so an inherited Intel selector
+            # is not passed down to child workers.
+            for env_var in (
+                "CUDA_VISIBLE_DEVICES",
+                "ROCR_VISIBLE_DEVICES",
+                "HIP_VISIBLE_DEVICES",
+                "ONEAPI_DEVICE_SELECTOR",
+                device_control_env_var,
+            ):
+                os.environ.pop(env_var, None)
+        else:
+            # Set the platform's device-visibility var to the Ray-assigned accelerator when
+            # either RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set (Ray does not set it) or
+            # the var is simply absent - e.g. Intel XPU, where Ray sets CUDA_VISIBLE_DEVICES
+            # but not ZE_AFFINITY_MASK, the var vLLM's XPU platform actually reads.
+            #
+            # ZE_AFFINITY_MASK must be set before the Level-Zero runtime initializes; this runs
+            # before any accelerator API call. The value is the Ray-assigned accelerator ID;
+            # how ZE_AFFINITY_MASK maps it (root device vs. tile) depends on the L0 hierarchy.
+            if ray_noset_visible_devices() or device_control_env_var not in os.environ:
+                gpu_ids = ray.get_gpu_ids()
+                if not gpu_ids:
+                    raise RuntimeError("Ray did not assign an accelerator to the vLLM actor")
+                # ONEAPI_DEVICE_SELECTOR and ZE_AFFINITY_MASK intersect in Level-Zero; if Ray
+                # set the selector, keeping it can yield 0 visible devices. Clear before masking.
+                if device_control_env_var == "ZE_AFFINITY_MASK":
+                    os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
+                os.environ[device_control_env_var] = str(gpu_ids[0])
 
         if bundle_indices is not None:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
@@ -166,6 +210,10 @@ class RolloutRayActor:
             from openrlhf.utils.vlm_utils import dedup_media_tokens
 
             prompt_token_ids = dedup_media_tokens(prompt_token_ids, self._mm_pad_token_ids)
+
+        # Lazy import - see module-top note: vllm is never imported at module level.
+        from vllm.inputs import TokensPrompt
+        from vllm.utils import random_uuid
 
         prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
         if multi_modal_data:
@@ -298,6 +346,9 @@ def create_vllm_engines(
             actor_kwargs["limit_mm_per_prompt"] = {"image": max_images_per_prompt}
 
         if logprobs_mode:
+            # Lazy import - see module-top note: vllm is never imported at module level.
+            import vllm
+
             actor_kwargs["logprobs_mode"] = logprobs_mode
             actor_kwargs["max_logprobs"] = 1
             assert version.parse(vllm.__version__) > version.parse(

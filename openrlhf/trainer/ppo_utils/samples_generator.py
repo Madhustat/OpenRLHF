@@ -4,15 +4,11 @@ from typing import List, Optional, Tuple
 import ray
 import torch
 from tqdm import tqdm
+from vllm import SamplingParams
 
 from openrlhf.trainer.ppo_utils.experience import Experience
+from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
 from openrlhf.utils.logging_utils import init_logger
-
-# SamplingParams and batch_vllm_engine_call require the `vllm` package, which
-# is optional (PPO can run with --vllm.num_engines 0, DeepSpeed-only rollout).
-# Imported lazily inside the functions that use them below, rather than here
-# at module load time - same class of fix as ring_attn_utils.py's flash_attn
-# import (see MASTER_setup_and_fixes_guide.md Part 3.1).
 
 logger = init_logger(__name__)
 
@@ -68,8 +64,6 @@ class SamplesGenerator:
             self._eval_dataloader_iter = iter(self.eval_dataloader)
 
         if self.args.vllm.enable_sleep:
-            from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
-
             batch_vllm_engine_call(self.vllm_engines, "wake_up")
 
         all_experiences: List[Experience] = []
@@ -86,8 +80,6 @@ class SamplesGenerator:
                     break
         finally:
             if self.args.vllm.enable_sleep:
-                from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
-
                 batch_vllm_engine_call(self.vllm_engines, "sleep")
             self._eval_dataloader_iter = None
 
@@ -112,8 +104,6 @@ class SamplesGenerator:
         # Fill buffer if it doesn't have enough for one training chunk.
         if len(self._sample_buffer) < chunk_size and self._dataloader_iter is not None:
             if self.args.vllm.enable_sleep:
-                from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
-
                 batch_vllm_engine_call(self.vllm_engines, "wake_up")
 
             gen_batch_size = (
@@ -127,8 +117,6 @@ class SamplesGenerator:
             )
 
             if self.args.vllm.enable_sleep:
-                from openrlhf.trainer.ray.vllm_engine import batch_vllm_engine_call
-
                 batch_vllm_engine_call(self.vllm_engines, "sleep")
 
             if self.args.algo.dynamic_filtering_enable and prompts_consumed:
@@ -212,8 +200,6 @@ class SamplesGenerator:
         self, prompts: List[str], labels: List[str], *, images: List = None, **generate_kwargs
     ) -> List:
         """Send prompts to rollout executors and return Ray object refs."""
-        from vllm import SamplingParams
-
         sampling_params = SamplingParams(
             temperature=generate_kwargs.get("temperature", 1.0),
             top_p=generate_kwargs.get("top_p", 1.0),
