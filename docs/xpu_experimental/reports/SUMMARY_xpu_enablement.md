@@ -13,63 +13,47 @@ through upstream-friendly, device-agnostic changes that preserve existing NVIDIA
 
 ## Headline
 
-- **Fully enabled on a single Intel XPU** for the validated RLHF workflows, spanning the full
-  Ray + vLLM + DeepSpeed stack. **Multi-XPU enablement is in progress.**
-- **Unit tests: 100% pass** on the XPU-runnable suite (0 failures, 0 blocked).
+- **Unit tests: 100% pass** on XPU (12/12 runnable; 0 failures, 0 blocked).
 - **3 test-backed PRs submitted upstream.**
-- **No regression for NVIDIA/CUDA users, by design:** the enablement is a device-agnostic
-  PyTorch API migration plus a few targeted correctness/compatibility fixes — one code path
-  adapts to the hardware (no NVIDIA-vs-Intel branching), split into focused, independently
-  reviewable PRs to keep review and regression risk low.
+- **Fully enabled on a single Intel XPU** across the Ray + vLLM + DeepSpeed stack. Multi-XPU is WIP.
+- **No NVIDIA regression** — one device-agnostic code path, no vendor branching.
 
 ---
 
 ## Unit tests at a glance
 
-Of **21 unit tests total**, **12 are XPU-runnable and all 12 pass (100%)**; the other 9 are
-pure-software tests (hardware-independent) and also pass. Nothing fails or is blocked.
+| | Count |
+|---|---:|
+| Total unit tests | 21 |
+| Runnable on XPU | 12 |
+| **Passing on XPU** | **12 (100%)** |
+| Pure-software tests passing | 9 / 9 |
+| Failures / blocked | 0 |
+| Newly added for XPU | 4 |
 
-| Category | Count | What it is |
-|---|---:|---|
-| **Newly added XPU-enablement tests** | **4** | 2 oneCCL log-level tests + 2 distributed-backend tests |
-| **Existing tests extended to run on XPU** | 8 | Loss-aggregation tests, now exercised on the accelerator (previously CPU-only) |
-| **Existing pure-software tests** | 9 | Ray environment-variable behavior (hardware-independent) |
-| **Total** | **21** | |
+The 4 new tests come from 2 of the submitted PRs (2 tests each); a 3rd PR extended 8 existing
+tests to run on XPU.
 
 ---
 
 ## The 3 submitted PRs
 
-| PR | What it delivers |
+| PR | Delivers |
 |---|---|
-| **oneCCL logging** | Makes Intel's communication library (oneCCL) log correctly alongside NVIDIA's — **2 new tests.** |
-| **Distributed-backend enablement** | Proves real multi-process communication works on each vendor's hardware (auto-selects the right backend per device) — **2 new tests.** |
-| **Loss-aggregation on accelerator** | Extends **8 existing tests** so they actually run on the accelerator (XPU/CUDA), not just CPU. |
-
-All three are written to work on both NVIDIA and Intel from a single code path.
+| **oneCCL logging** | Intel's oneCCL logs correctly alongside NVIDIA's — 2 new tests. |
+| **Distributed-backend** | Real multi-process comms verified per vendor (auto-selects backend) — 2 new tests. |
+| **Loss-aggregation** | 8 existing tests extended to run on the accelerator, not just CPU. |
 
 ---
 
-## Still in progress (WIP)
+## Work in progress
 
-Additional, larger enablement is implemented and passing on a single XPU, and is being hardened
-before upstreaming:
-
-- Device-agnostic API migration across the framework (the bulk of the enablement).
-- vLLM integration on XPU — device assignment and model weight synchronization.
-- Making a CUDA-only attention dependency optional so XPU can run without it.
-
-These work today on one XPU; what remains is **validation on larger hardware**.
-
----
-
-## Next steps
-
-1. Validate on **multi-XPU** and **NVIDIA** hardware (the pieces we can't test on a single-GPU box).
-2. Finish hardening and **upstream the remaining enablement PRs**.
+Larger enablement — device-API migration, vLLM device pinning + weight sync, optional CUDA-only
+attention dep — is implemented and passing on a single XPU. Remaining before upstreaming:
+**multi-XPU validation** and **NVIDIA regression runs** (need the hardware).
 
 ---
 
 ## Ask
 
-Access to **multi-XPU and NVIDIA hardware** to complete final validation before upstreaming.
+Access to **multi-XPU and NVIDIA hardware** to finish validation and upstream the remaining PRs.
