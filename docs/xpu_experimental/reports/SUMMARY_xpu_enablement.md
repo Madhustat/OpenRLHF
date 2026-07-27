@@ -15,8 +15,8 @@ through upstream-friendly, device-agnostic changes that preserve existing NVIDIA
 
 - **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0 blocked.
 - **Three unit-test-backed PRs submitted upstream** for review.
-- **Fully enabled on a single Intel XPU** across the full Ray + vLLM + DeepSpeed stack; multi-XPU
-  enablement is in progress.
+- **OpenRLHF fully enabled on a single Intel XPU** for the validated RLHF workflows, spanning the
+  full Ray + vLLM + DeepSpeed stack; multi-XPU enablement is in progress.
 - **No NVIDIA regression by design** — a single device-agnostic code path adapts to the hardware,
   with no NVIDIA-vs-Intel branching.
 
