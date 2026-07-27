@@ -13,10 +13,12 @@ through upstream-friendly, device-agnostic changes that preserve existing NVIDIA
 
 ## Headline
 
-- **Unit tests: 100% pass** on XPU (12/12 runnable; 0 failures, 0 blocked).
-- **3 test-backed PRs submitted upstream.**
-- **Fully enabled on a single Intel XPU** across the Ray + vLLM + DeepSpeed stack. Multi-XPU is WIP.
-- **No NVIDIA regression** — one device-agnostic code path, no vendor branching.
+- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0 blocked.
+- **Three unit-test-backed PRs submitted upstream** for review.
+- **Fully enabled on a single Intel XPU** across the full Ray + vLLM + DeepSpeed stack; multi-XPU
+  enablement is in progress.
+- **No NVIDIA regression by design** — a single device-agnostic code path adapts to the hardware,
+  with no NVIDIA-vs-Intel branching.
 
 ---
 
@@ -48,9 +50,9 @@ tests to run on XPU.
 
 ## Work in progress
 
-Larger enablement — device-API migration, vLLM device pinning + weight sync, optional CUDA-only
-attention dep — is implemented and passing on a single XPU. Remaining before upstreaming:
-**multi-XPU validation** and **NVIDIA regression runs** (need the hardware).
+Further enablement is implemented and validated on a single XPU; remaining automated coverage,
+multi-XPU validation, and NVIDIA regression runs are being completed before final upstream
+submission.
 
 ---
 
