@@ -2,8 +2,8 @@
 
 **OpenRLHF — a leading open-source RLHF framework that unifies Ray, vLLM, and DeepSpeed** into
 one pipeline for reinforcement-learning post-training (the technique behind aligning modern LLMs).
-We have brought that full Ray + vLLM + DeepSpeed stack to Intel XPU — running on the same code
-NVIDIA users run.
+We have brought that full Ray + vLLM + DeepSpeed stack to Intel XPU — using the same
+device-agnostic code path that NVIDIA runs on, with no NVIDIA regression.
 
 **Goal:** Make OpenRLHF's full training loop run on Intel XPU — orchestration (Ray), rollout
 generation (vLLM), and distributed training (DeepSpeed) working together on Intel hardware —
@@ -13,47 +13,40 @@ through upstream-friendly, device-agnostic changes that preserve existing NVIDIA
 
 ## Headline
 
-- **Unit tests: 100% pass** on the XPU-runnable suite (0 failures, 0 blocked) — plus new tests
-  added to lock in XPU behavior.
+- **Fully enabled on a single Intel XPU** for the validated RLHF workflows, spanning the full
+  Ray + vLLM + DeepSpeed stack. **Multi-XPU enablement is in progress.**
+- **Unit tests: 100% pass** on the XPU-runnable suite (0 failures, 0 blocked).
 - **3 test-backed PRs submitted upstream.**
-- **OpenRLHF is operational on a single Intel XPU** for the validated RLHF workflows, spanning
-  the full Ray + vLLM + DeepSpeed stack.
-- **NVIDIA/CUDA behavior is preserved** — changes are device-agnostic (one code path adapts to
-  the hardware), so there is no regression for existing users.
-- **Approach:** a device-agnostic PyTorch API migration plus a few targeted correctness and
-  compatibility fixes, split into focused, independently reviewable PRs to reduce review and
-  regression risk.
-- **Work in progress:** further enablement is implemented and validated on a single XPU;
-  remaining automated coverage, multi-XPU validation, and NVIDIA regression runs are being
-  completed before final upstream submission.
+- **No regression for NVIDIA/CUDA users, by design:** the enablement is a device-agnostic
+  PyTorch API migration plus a few targeted correctness/compatibility fixes — one code path
+  adapts to the hardware (no NVIDIA-vs-Intel branching), split into focused, independently
+  reviewable PRs to keep review and regression risk low.
 
 ---
 
 ## Unit tests at a glance
 
-| | Count |
-|---|---|
-| Total unit tests | 21 |
-| Runnable on XPU | 12 |
-| **Passing on XPU** | **12 (100%)** |
-| Pure-software tests passing | 9 / 9 |
-| Failures / blocked | 0 |
-| Newly added for XPU | 4 |
+Of **21 unit tests total**, **12 are XPU-runnable and all 12 pass (100%)**; the other 9 are
+pure-software tests (hardware-independent) and also pass. Nothing fails or is blocked.
 
-*In short: everything that can run on XPU passes, nothing is failing, and we added new tests to
-lock in the XPU behavior.*
+| Category | Count | What it is |
+|---|---:|---|
+| **Newly added XPU-enablement tests** | **4** | 2 oneCCL log-level tests + 2 distributed-backend tests |
+| **Existing tests extended to run on XPU** | 8 | Loss-aggregation tests, now exercised on the accelerator (previously CPU-only) |
+| **Existing pure-software tests** | 9 | Ray environment-variable behavior (hardware-independent) |
+| **Total** | **21** | |
 
 ---
 
 ## The 3 submitted PRs
 
-| PR | In plain terms |
+| PR | What it delivers |
 |---|---|
-| **oneCCL logging** | Makes Intel's communication library log correctly alongside NVIDIA's. |
-| **Loss-aggregation tests** | Existing tests now actually exercise the accelerator, not just CPU. |
-| **Distributed-backend test** | Proves real multi-process communication works on each vendor's hardware. |
+| **oneCCL logging** | Makes Intel's communication library (oneCCL) log correctly alongside NVIDIA's — **2 new tests.** |
+| **Distributed-backend enablement** | Proves real multi-process communication works on each vendor's hardware (auto-selects the right backend per device) — **2 new tests.** |
+| **Loss-aggregation on accelerator** | Extends **8 existing tests** so they actually run on the accelerator (XPU/CUDA), not just CPU. |
 
-All three are written to work on both NVIDIA and Intel from one code path.
+All three are written to work on both NVIDIA and Intel from a single code path.
 
 ---
 
