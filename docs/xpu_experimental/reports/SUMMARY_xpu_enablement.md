@@ -48,11 +48,23 @@ tests to run on XPU.
 
 ---
 
-## Work in progress
+## Still in progress (WIP)
 
-Further enablement is implemented and validated on a single XPU; remaining automated coverage,
-multi-XPU validation, and NVIDIA regression runs are being completed before final upstream
-submission.
+Additional, larger enablement is implemented and passing on a single XPU, and is being hardened
+before upstreaming:
+
+- Device-agnostic API migration across the framework (the bulk of the enablement).
+- vLLM integration on XPU — device assignment and model weight synchronization.
+- Making a CUDA-only attention dependency optional so XPU can run without it.
+
+These work today on one XPU; what remains is **validation on larger hardware**.
+
+---
+
+## Next steps
+
+1. Validate on **multi-XPU** and **NVIDIA** hardware (the pieces we can't test on a single-GPU box).
+2. Finish hardening and **upstream the remaining enablement PRs**.
 
 ---
 
