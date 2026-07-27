@@ -65,9 +65,3 @@ These work today on one XPU; what remains is **validation on larger hardware**.
 
 1. Validate on **multi-XPU** and **NVIDIA** hardware (the pieces we can't test on a single-GPU box).
 2. Finish hardening and **upstream the remaining enablement PRs**.
-
----
-
-## Ask
-
-Access to **multi-XPU and NVIDIA hardware** to finish validation and upstream the remaining PRs.
