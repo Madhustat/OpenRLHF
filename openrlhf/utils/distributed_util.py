@@ -112,24 +112,37 @@ def _init_xccl_process_group(master_address, master_port, rank, world_size, devi
 def resolve_vllm_sync_backend(backend=None):
     """Resolve and validate the vLLM weight-sync backend.
 
-    When ``backend`` is None (unset), auto-select per platform: NCCL/RCCL for CUDA/ROCm, XCCL
-    for Intel XPU (direct device-to-device), and gloo as a last-resort fallback. An explicitly
-    configured backend is honored and validated strictly: it is never silently replaced, and an
-    impossible combination (e.g. 'nccl' on a build without CUDA/ROCm) raises a clear error.
+    When ``backend`` is None (unset), auto-select the best CORRECT backend for the platform:
+    NCCL/RCCL on CUDA/ROCm; XCCL on Intel XPU with >=2 physical devices (direct XPU->XPU); gloo
+    on a single XPU or otherwise. An explicitly configured backend is validated strictly and
+    honored where correct: an impossible combo (e.g. 'nccl' without CUDA/ROCm) raises; 'xccl' on
+    a single XPU falls back to gloo (oneCCL needs one rank per device, so single-XPU xccl is
+    incorrect).
     """
     import torch
 
     is_nccl_platform = bool(getattr(torch.version, "cuda", None) or getattr(torch.version, "hip", None))
     is_xpu_platform = bool(getattr(torch.version, "xpu", None)) and dist_xccl_available()
+    xpu_count = torch.xpu.device_count() if is_xpu_platform else 0
 
     if backend is None:
-        # Auto-detect a SAFE default: nccl on CUDA/ROCm, else gloo. gloo (CPU-staged) works on
-        # any XPU config including a single device. XCCL (direct XPU->XPU) is faster but is
-        # opt-in via --vllm.sync_backend xccl, because it requires distinct physical devices
-        # per rank and hangs when the trainer and vLLM engine share one XPU (colocated,
-        # single-GPU). Auto-selecting xccl would regress single-XPU users, so we don't.
-        effective_backend = "nccl" if is_nccl_platform else "gloo"
-        logger.info("vLLM weight-sync backend auto-selected: %s", effective_backend)
+        # Auto-detect the best CORRECT backend for the platform:
+        #   - CUDA / ROCm            -> nccl   (native GPU-to-GPU)
+        #   - Intel XPU, >=2 devices -> xccl   (native XPU-to-XPU, no CPU hop)
+        #   - Intel XPU, single dev  -> gloo   (CPU-staged; see below)
+        #   - anything else          -> gloo
+        # XCCL is only chosen with >=2 physical XPUs. Intel oneCCL requires ONE RANK PER DEVICE
+        # (it maps ranks to unique device UUIDs); with the trainer and vLLM engine sharing a
+        # single physical XPU (one UUID) XCCL cannot form a valid group and returns incorrect
+        # results, so single-XPU must use gloo. NVIDIA/CUDA and ROCm are unaffected (they use
+        # nccl regardless of device count).
+        if is_nccl_platform:
+            effective_backend = "nccl"
+        elif is_xpu_platform and xpu_count >= 2:
+            effective_backend = "xccl"
+        else:
+            effective_backend = "gloo"
+        logger.info("vLLM weight-sync backend auto-selected: %s (xpu_count=%d)", effective_backend, xpu_count)
         return effective_backend
 
     if backend not in {"nccl", "gloo", "xccl"}:
@@ -150,14 +163,15 @@ def resolve_vllm_sync_backend(backend=None):
             "Use sync_backend='nccl' (CUDA/ROCm) or 'gloo', or omit the option to auto-detect."
         )
 
-    if backend == "xccl" and torch.xpu.device_count() < 2:
-        # XCCL is a device-to-device collective. With the trainer and vLLM engine sharing a
-        # single physical XPU it deadlocks, so fall back to gloo (CPU-staged, single-device
-        # safe) rather than hang. XCCL is only engaged when >=2 physical XPUs are present.
+    if backend == "xccl" and xpu_count < 2:
+        # Intel oneCCL requires one rank per physical device (unique device UUID). With the
+        # trainer and vLLM engine sharing a single XPU, XCCL can't form a valid group and
+        # returns incorrect results, so fall back to gloo (CPU-staged, single-device safe)
+        # rather than silently corrupt weights. XCCL is only correct with >=2 physical XPUs.
         logger.warning(
             "sync_backend='xccl' requested but only %d XPU visible; XCCL needs >=2 physical "
-            "devices (single-device XCCL hangs). Falling back to gloo.",
-            torch.xpu.device_count(),
+            "devices (one rank per device). Falling back to gloo.",
+            xpu_count,
         )
         return "gloo"
 

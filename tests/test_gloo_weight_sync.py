@@ -43,10 +43,12 @@ def _patch_platform(cuda=None, hip=None, xpu=None, xccl=False, xpu_count=1):
 @pytest.mark.parametrize(
     "cuda,hip,xpu,xccl,xpu_count,requested,expected",
     [
-        # auto-detect (unset) -> SAFE default: nccl on CUDA/ROCm, else gloo (xccl is opt-in)
+        # auto-detect (unset): nccl on CUDA/ROCm; xccl on XPU with >=2 devices; else gloo
         ("12.1", None, None, False, 1, None, "nccl"),   # CUDA -> nccl
         (None, "6.0", None, False, 1, None, "nccl"),    # ROCm -> nccl
-        (None, None, "20250", True, 2, None, "gloo"),   # XPU + xccl + 2 devices -> STILL gloo (xccl opt-in)
+        (None, None, "20250", True, 2, None, "xccl"),   # XPU + xccl + 2 devices -> xccl (direct XPU->XPU)
+        (None, None, "20250", True, 8, None, "xccl"),   # XPU + xccl + 8 devices -> xccl
+        (None, None, "20250", True, 1, None, "gloo"),   # XPU + xccl + 1 device  -> gloo (single-tile can't xccl)
         (None, None, "20250", False, 1, None, "gloo"),  # XPU without xccl -> gloo
         (None, None, None, False, 1, None, "gloo"),     # nothing detected -> gloo
         # explicit

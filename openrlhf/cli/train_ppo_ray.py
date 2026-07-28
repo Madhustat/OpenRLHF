@@ -243,12 +243,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--vllm.sync_backend",
-        choices=("nccl", "gloo"),
+        choices=("nccl", "gloo", "xccl"),
         default=None,
         help=(
-            "DeepSpeed -> vLLM weight-sync backend. Omitted/None: auto-detect "
-            "(NCCL/RCCL on CUDA/ROCm, gloo with CPU staging on Intel XPU). "
-            "'nccl': CUDA or ROCm only. 'gloo': CPU-staged, incl. Intel XPU."
+            "DeepSpeed -> vLLM weight-sync backend. Omitted/None: auto-detect - "
+            "NCCL/RCCL on CUDA/ROCm, XCCL on multi-XPU (direct XPU-to-XPU), gloo on single XPU. "
+            "'nccl': CUDA/ROCm only. 'xccl': Intel XPU with >=2 devices (falls back to gloo on 1). "
+            "'gloo': CPU-staged, works on any accelerator."
         ),
     )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
