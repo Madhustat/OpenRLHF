@@ -39,36 +39,135 @@ class _GlooBroadcastCommunicator:
         return tensor
 
 
+class _XcclBroadcastCommunicator:
+    """Broadcast XPU tensors directly device-to-device over a stateless XCCL process group.
+
+    Unlike the gloo fallback, no CPU staging: the tensor stays on the XPU and XCCL (Intel
+    oneCCL) moves it XPU->XPU. Broadcasts in place and returns the same tensor, matching the
+    PyNcclCommunicator / _GlooBroadcastCommunicator interface.
+    """
+
+    def __init__(self, pg, device):
+        self.pg = pg
+        self.device = device
+
+    def broadcast(self, tensor, src, stream=None):
+        # stream is accepted for interface parity; XCCL uses the current XPU stream.
+        from torch.distributed.distributed_c10d import BroadcastOptions
+
+        opts = BroadcastOptions()
+        opts.rootRank = src
+        work = self.pg.broadcast([tensor], opts)
+        work.wait()
+        return tensor
+
+
+def _init_xccl_process_group(master_address, master_port, rank, world_size, device):
+    """Build a stateless XCCL ProcessGroup for XPU, mirroring vLLM's gloo/NCCL stateless
+    pattern. Needed because vLLM's XPU platform does not implement
+    stateless_init_device_torch_dist_pg (it raises NotImplementedError), so we construct the
+    ProcessGroup + XCCL backend directly here instead of going through vLLM's helper.
+
+    ``device`` is this rank's own XPU (e.g. torch.device("xpu", idx)). We bind it explicitly
+    before/while building the group and register the backend for that specific device index -
+    without this, ProcessGroupXCCL warns "device ... is currently unknown" and can HANG because
+    the rank->device mapping is undefined. The backend is registered for the exact xpu:index
+    rather than a generic torch.device("xpu").
+    """
+    from datetime import timedelta
+
+    import torch
+    import torch.distributed as dist
+    from torch.distributed.distributed_c10d import PrefixStore, ProcessGroup, ProcessGroupXCCL
+
+    # Normalize to an indexed xpu device and make it current before constructing the backend,
+    # so XCCL/Level-Zero binds this rank to a definite device.
+    if not isinstance(device, torch.device):
+        device = torch.device(device)
+    if device.type != "xpu":
+        raise RuntimeError(f"xccl weight-sync requires an XPU device, got {device!r}")
+    device_index = device.index if device.index is not None else torch.xpu.current_device()
+    device = torch.device("xpu", device_index)
+    torch.xpu.set_device(device_index)
+
+    timeout = timedelta(seconds=1800)
+    store = dist.TCPStore(master_address, master_port, world_size, is_master=(rank == 0), timeout=timeout)
+    prefix_store = PrefixStore("openrlhf-xccl", store)
+
+    pg = ProcessGroup(prefix_store, rank, world_size)
+    # Bind the group to this rank's device so collectives have a defined rank->device mapping.
+    try:
+        pg.bound_device_id = device
+    except Exception:
+        # Older torch builds may not expose bound_device_id; set_device above is the fallback.
+        pass
+    backend_class = ProcessGroupXCCL(prefix_store, rank, world_size)
+    backend_type = ProcessGroup.BackendType.XCCL
+    pg._set_default_backend(backend_type)
+    backend_class._set_sequence_number_for_group()
+    pg._register_backend(device, backend_type, backend_class)
+    return pg
+
+
 def resolve_vllm_sync_backend(backend=None):
     """Resolve and validate the vLLM weight-sync backend.
 
-    When ``backend`` is None (unset), auto-select NCCL/RCCL for CUDA/ROCm builds and gloo for
-    other accelerator builds (e.g. Intel XPU). An explicitly configured backend is honored and
-    validated strictly: it is never silently replaced, and an impossible combination (e.g.
-    'nccl' on a build without CUDA/ROCm) raises a clear error.
+    When ``backend`` is None (unset), auto-select per platform: NCCL/RCCL for CUDA/ROCm, XCCL
+    for Intel XPU (direct device-to-device), and gloo as a last-resort fallback. An explicitly
+    configured backend is honored and validated strictly: it is never silently replaced, and an
+    impossible combination (e.g. 'nccl' on a build without CUDA/ROCm) raises a clear error.
     """
     import torch
 
     is_nccl_platform = bool(getattr(torch.version, "cuda", None) or getattr(torch.version, "hip", None))
+    is_xpu_platform = bool(getattr(torch.version, "xpu", None)) and dist_xccl_available()
 
     if backend is None:
+        # Auto-detect a SAFE default: nccl on CUDA/ROCm, else gloo. gloo (CPU-staged) works on
+        # any XPU config including a single device. XCCL (direct XPU->XPU) is faster but is
+        # opt-in via --vllm.sync_backend xccl, because it requires distinct physical devices
+        # per rank and hangs when the trainer and vLLM engine share one XPU (colocated,
+        # single-GPU). Auto-selecting xccl would regress single-XPU users, so we don't.
         effective_backend = "nccl" if is_nccl_platform else "gloo"
         logger.info("vLLM weight-sync backend auto-selected: %s", effective_backend)
         return effective_backend
 
-    if backend not in {"nccl", "gloo"}:
+    if backend not in {"nccl", "gloo", "xccl"}:
         raise ValueError(
             f"Unsupported vLLM weight-sync backend {backend!r}; expected 'nccl', 'gloo', "
-            "or None for automatic selection"
+            "'xccl', or None for automatic selection"
         )
 
     if backend == "nccl" and not is_nccl_platform:
         raise RuntimeError(
             "vLLM sync_backend='nccl' requires a CUDA or ROCm build. "
-            "Use sync_backend='gloo', or omit the option to auto-detect the backend."
+            "Use sync_backend='xccl' (Intel XPU, multi-device) or 'gloo', or omit to auto-detect."
         )
 
+    if backend == "xccl" and not is_xpu_platform:
+        raise RuntimeError(
+            "vLLM sync_backend='xccl' requires an Intel XPU build with XCCL support. "
+            "Use sync_backend='nccl' (CUDA/ROCm) or 'gloo', or omit the option to auto-detect."
+        )
+
+    if backend == "xccl" and torch.xpu.device_count() < 2:
+        # XCCL is a device-to-device collective. With the trainer and vLLM engine sharing a
+        # single physical XPU it deadlocks, so fall back to gloo (CPU-staged, single-device
+        # safe) rather than hang. XCCL is only engaged when >=2 physical XPUs are present.
+        logger.warning(
+            "sync_backend='xccl' requested but only %d XPU visible; XCCL needs >=2 physical "
+            "devices (single-device XCCL hangs). Falling back to gloo.",
+            torch.xpu.device_count(),
+        )
+        return "gloo"
+
     return backend
+
+
+def dist_xccl_available():
+    import torch.distributed as dist
+
+    return hasattr(dist, "is_xccl_available") and dist.is_xccl_available()
 
 
 def stateless_init_process_group(master_address, master_port, rank, world_size, device, backend=None):
@@ -92,6 +191,15 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
         pg = StatelessProcessGroup.create(host=master_address, port=master_port, rank=rank, world_size=world_size)
         logger.info("vLLM weight-sync backend: pynccl")
         return PyNcclCommunicator(pg, device=device)
+
+    if backend == "xccl":
+        # Intel XPU: broadcast weights directly XPU->XPU over a stateless XCCL process group,
+        # no CPU staging. vLLM's XPU platform doesn't implement stateless_init_device_torch_dist_pg,
+        # so we build the XCCL ProcessGroup ourselves (see _init_xccl_process_group). device is
+        # this rank's own XPU - passed through so XCCL binds a definite rank->device mapping.
+        pg = _init_xccl_process_group(master_address, master_port, rank, world_size, device)
+        logger.info("vLLM weight-sync backend: xccl (direct XPU-to-XPU)")
+        return _XcclBroadcastCommunicator(pg, device)
 
     if backend == "gloo":
         # No NCCL/RCCL on this platform (e.g. Intel XPU). PyNcclCommunicator silently sets

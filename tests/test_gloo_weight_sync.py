@@ -26,42 +26,65 @@ import torch.multiprocessing as mp
 from openrlhf.utils.distributed_util import _GlooBroadcastCommunicator, resolve_vllm_sync_backend
 
 
-# --- backend resolver (Option C: auto when unset, strict on explicit) --------------------
-# The resolver reads torch.version.cuda / torch.version.hip. Patch those attrs directly so we
-# can simulate CUDA / ROCm / XPU builds regardless of the box the tests run on.
-def _patch_platform(cuda=None, hip=None):
+# --- backend resolver (auto when unset, strict on explicit) ------------------------------
+# The resolver reads torch.version.cuda / torch.version.hip / torch.version.xpu and (for XPU)
+# dist_xccl_available(). Patch all of them so we can simulate CUDA / ROCm / XPU builds
+# regardless of the box the tests run on.
+def _patch_platform(cuda=None, hip=None, xpu=None, xccl=False, xpu_count=1):
     return (
         patch("torch.version.cuda", cuda, create=True),
         patch("torch.version.hip", hip, create=True),
+        patch("torch.version.xpu", xpu, create=True),
+        patch("openrlhf.utils.distributed_util.dist_xccl_available", return_value=xccl),
+        patch("torch.xpu.device_count", return_value=xpu_count, create=True),
     )
 
 
 @pytest.mark.parametrize(
-    "cuda,hip,requested,expected",
+    "cuda,hip,xpu,xccl,xpu_count,requested,expected",
     [
-        (None, None, None, "gloo"),      # unset on XPU-like build -> gloo
-        ("12.1", None, None, "nccl"),    # unset on CUDA -> nccl
-        (None, "6.0", None, "nccl"),     # unset on ROCm -> nccl
-        ("12.1", None, "nccl", "nccl"),  # explicit nccl on CUDA -> honored
-        (None, None, "gloo", "gloo"),    # explicit gloo on XPU -> honored
-        ("12.1", None, "gloo", "gloo"),  # explicit gloo on CUDA -> honored, not replaced
+        # auto-detect (unset) -> SAFE default: nccl on CUDA/ROCm, else gloo (xccl is opt-in)
+        ("12.1", None, None, False, 1, None, "nccl"),   # CUDA -> nccl
+        (None, "6.0", None, False, 1, None, "nccl"),    # ROCm -> nccl
+        (None, None, "20250", True, 2, None, "gloo"),   # XPU + xccl + 2 devices -> STILL gloo (xccl opt-in)
+        (None, None, "20250", False, 1, None, "gloo"),  # XPU without xccl -> gloo
+        (None, None, None, False, 1, None, "gloo"),     # nothing detected -> gloo
+        # explicit
+        ("12.1", None, None, False, 1, "nccl", "nccl"),
+        (None, None, "20250", True, 2, "xccl", "xccl"),  # explicit xccl + 2 XPU -> xccl (the real path)
+        (None, None, "20250", True, 1, "xccl", "gloo"),  # explicit xccl + 1 XPU -> falls back to gloo (no hang)
+        (None, None, "20250", True, 2, "gloo", "gloo"),  # explicit gloo on XPU -> honored
+        ("12.1", None, None, False, 1, "gloo", "gloo"),  # explicit gloo on CUDA -> honored
     ],
 )
-def test_resolve_backend_auto_and_explicit(cuda, hip, requested, expected):
-    p_cuda, p_hip = _patch_platform(cuda, hip)
-    with p_cuda, p_hip:
+def test_resolve_backend_auto_and_explicit(cuda, hip, xpu, xccl, xpu_count, requested, expected):
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda, hip, xpu, xccl, xpu_count)
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt:
         assert resolve_vllm_sync_backend(requested) == expected
 
 
 def test_resolve_backend_explicit_nccl_on_non_nccl_raises():
-    p_cuda, p_hip = _patch_platform(cuda=None, hip=None)  # XPU-like
-    with p_cuda, p_hip, pytest.raises(RuntimeError, match="requires a CUDA or ROCm build"):
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda=None, hip=None, xpu="20250", xccl=True, xpu_count=2)
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, pytest.raises(RuntimeError, match="requires a CUDA or ROCm build"):
         resolve_vllm_sync_backend("nccl")
 
 
+def test_resolve_backend_explicit_xccl_on_non_xpu_raises():
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda="12.1", hip=None, xpu=None, xccl=False, xpu_count=0)
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, pytest.raises(RuntimeError, match="requires an Intel XPU build"):
+        resolve_vllm_sync_backend("xccl")
+
+
+def test_resolve_backend_xccl_single_xpu_falls_back_to_gloo():
+    # Explicit xccl on a single-XPU box must NOT hang - it falls back to gloo with a warning.
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda=None, hip=None, xpu="20250", xccl=True, xpu_count=1)
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt:
+        assert resolve_vllm_sync_backend("xccl") == "gloo"
+
+
 def test_resolve_backend_unknown_raises():
-    p_cuda, p_hip = _patch_platform(cuda="12.1", hip=None)
-    with p_cuda, p_hip, pytest.raises(ValueError, match="Unsupported vLLM weight-sync backend"):
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda="12.1", hip=None)
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, pytest.raises(ValueError, match="Unsupported vLLM weight-sync backend"):
         resolve_vllm_sync_backend("mpi")
 
 
@@ -164,3 +187,74 @@ def test_communicator_accepts_stream_kwarg():
     tensor = torch.zeros(2)
     # must not raise
     comm.broadcast(tensor, src=0, stream=None)
+
+
+# --- XCCL (direct XPU->XPU) weight-sync -------------------------------------------------
+def _xccl_multi_xpu_available():
+    # XCCL weight-sync needs DISTINCT physical XPUs per rank. With both ranks on a single
+    # physical XPU (device_count == 1) the collective is unreliable / can hang, so this test
+    # only runs on a real multi-XPU box.
+    import torch
+    from openrlhf.utils.distributed_util import dist_xccl_available
+
+    return bool(getattr(torch.version, "xpu", None)) and dist_xccl_available() and torch.xpu.device_count() >= 2
+
+
+def _xccl_worker(rank, world_size, port, result_queue):
+    """One rank: build the real XCCL communicator via stateless_init_process_group and
+    broadcast an XPU tensor directly (no CPU staging)."""
+    try:
+        import torch
+
+        from openrlhf.utils.distributed_util import stateless_init_process_group
+
+        # Each rank on its OWN physical XPU (this test only runs when device_count >= 2).
+        torch.xpu.set_device(rank)
+        comm = stateless_init_process_group(
+            "127.0.0.1", port, rank, world_size, torch.device("xpu", rank), backend="xccl"
+        )
+        tensor = torch.full((4,), 42.0 if rank == 0 else float(1000 + rank), device=f"xpu:{rank}")
+        out = comm.broadcast(tensor, src=0)
+        torch.xpu.synchronize()
+        result_queue.put((rank, out.cpu().tolist(), str(out.device), out is tensor, None))
+    except BaseException as e:  # noqa: BLE001
+        result_queue.put((rank, None, None, None, f"{type(e).__name__}: {e}"))
+        raise
+
+
+@pytest.mark.integration
+def test_xccl_broadcast_direct_on_xpu():
+    """Real 2-rank XCCL broadcast of XPU tensors through our communicator: every rank receives
+    rank 0's value, in place, staying on the XPU (no CPU staging). Skips if XCCL/XPU absent."""
+    if not _xccl_multi_xpu_available():
+        pytest.skip("XCCL/XPU not available on this build")
+
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    port = _find_free_port()
+    procs = [ctx.Process(target=_xccl_worker, args=(r, 2, port, result_queue)) for r in range(2)]
+    try:
+        for p in procs:
+            p.start()
+        results = {}
+        for _ in range(2):
+            try:
+                rank, vals, dev, in_place, err = result_queue.get(timeout=120)
+            except queue.Empty:
+                break
+            results[rank] = (vals, dev, in_place, err)
+        for p in procs:
+            p.join(timeout=15)
+
+        errors = {r: v[3] for r, v in results.items() if v[3] is not None}
+        assert not errors, f"xccl worker errors: {errors}"
+        assert set(results) == {0, 1}, f"missing ranks: {results}"
+        for rank in (0, 1):
+            vals, dev, in_place, _ = results[rank]
+            assert vals == [42.0] * 4, f"rank {rank} wrong values: {vals}"
+            assert dev.startswith("xpu"), f"rank {rank} left the XPU: {dev}"  # no CPU staging
+            assert in_place, f"rank {rank} did not broadcast in place"
+    finally:
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
