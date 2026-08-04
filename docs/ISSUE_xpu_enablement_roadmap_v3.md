@@ -22,18 +22,20 @@ The portability changes can be submitted now. Native XPU weight synchronization 
 
 ## Native trainer-to-vLLM weight synchronization **P2: waiting on upstream**
 
-OpenRLHF runs the trainer and vLLM rollout engines as separate Ray actors, so updated policy weights must be synchronized during online RL training. On NVIDIA, OpenRLHF supports NCCL-based synchronization and a CUDA-IPC optimization for colocated actors. On XPU, our downstream implementation currently uses a CPU-staged Gloo fallback:
+OpenRLHF runs the trainer and vLLM rollout engines as separate Ray actors, so updated policy weights must be synchronized during online RL training.
+
+XPU currently works through a downstream Gloo fallback:
 
 ```text
 trainer XPU -> CPU/Gloo -> vLLM XPU
 ```
 
-The Gloo fallback stays downstream and is not proposed as a separate upstream PR. The native device-to-device paths are being fixed/added upstream, and this work will be submitted once they ship in a compatible released stack:
+This fallback stays downstream and is not proposed as a separate upstream PR. Native device-to-device paths will be submitted once upstream support ships in a compatible released stack:
 
-- [ ] **Multi-XPU: XCCL** direct XPU→XPU broadcast. Blocked by a torch ↔ oneCCL ↔ vLLM compatibility issue on the current XPU stack: `torch >= 2.13` is required but not sufficient on its own, because the versions that fix the XCCL collective and the versions that keep the vLLM-XPU engine working do not currently line up in a single released stack. Unblocking needs a matched, pre-validated torch + oneCCL + oneAPI + vLLM combination (see [torch-xpu-ops#4238](https://github.com/intel/torch-xpu-ops/issues/4238)).
-- [ ] **Single-XPU (colocate): tensor-IPC** — the XPU analog of CUDA-IPC, landing upstream in PyTorch ([pytorch/pytorch#188789](https://github.com/pytorch/pytorch/pull/188789), [pytorch/pytorch#191725](https://github.com/pytorch/pytorch/pull/191725); tracking [torch-xpu-ops#4000](https://github.com/intel/torch-xpu-ops/issues/4000)).
+- [ ] **Multi-XPU: XCCL** direct XPU→XPU broadcast — waiting on a compatible XCCL + vLLM-XPU stack ([torch-xpu-ops#4238](https://github.com/intel/torch-xpu-ops/issues/4238)).
+- [ ] **Single-XPU (colocation): tensor-IPC** — waiting on cross-process XPU tensor IPC in PyTorch ([torch-xpu-ops#4000](https://github.com/intel/torch-xpu-ops/issues/4000)).
 
 ## Notes
 
-- The device-agnostic core and optional-attention PRs are intended to be independent of each other and of the weight-sync work, so each can be reviewed on its own; the exact file boundaries will be confirmed when the PRs are opened.
+- The device-agnostic core and optional-attention changes are independent of the native      weight-synchronization work and can be reviewed separately.
 - No user-facing change on CUDA is intended at any stage.
