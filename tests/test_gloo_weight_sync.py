@@ -27,28 +27,53 @@ from openrlhf.utils.distributed_util import _GlooBroadcastCommunicator, resolve_
 
 
 # --- backend resolver (auto when unset, strict on explicit) ------------------------------
-# The resolver reads torch.version.cuda / torch.version.hip / torch.version.xpu and (for XPU)
-# dist_xccl_available(). Patch all of them so we can simulate CUDA / ROCm / XPU builds
-# regardless of the box the tests run on.
+# The resolver reads torch.version.cuda / torch.version.hip / torch.version.xpu, (for XPU)
+# dist_xccl_available(), and the PHYSICAL XPU count. Patch all of them so we can simulate
+# CUDA / ROCm / XPU builds regardless of the box the tests run on. xpu_count models the number
+# of PHYSICAL XPUs on the host; both the sysfs probe (_physical_xpu_count) and the per-process
+# torch.xpu.device_count() are patched to it so the resolver sees a consistent world (the
+# resolver keys on max(physical, visible), so both must reflect the simulated count).
+class _patch_count:
+    """One context manager that patches BOTH the physical-XPU probe and torch.xpu.device_count,
+    so _patch_platform keeps its 5-tuple shape (callers unpack 5) while the resolver's
+    max(_physical_xpu_count(), device_count()) sees the simulated count consistently."""
+
+    def __init__(self, xpu_count):
+        self._physical = patch("openrlhf.utils.distributed_util._physical_xpu_count", return_value=xpu_count)
+        self._visible = patch("torch.xpu.device_count", return_value=xpu_count, create=True)
+
+    def __enter__(self):
+        self._physical.__enter__()
+        self._visible.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        self._visible.__exit__(*exc)
+        self._physical.__exit__(*exc)
+        return False
+
+
 def _patch_platform(cuda=None, hip=None, xpu=None, xccl=False, xpu_count=1):
     return (
         patch("torch.version.cuda", cuda, create=True),
         patch("torch.version.hip", hip, create=True),
         patch("torch.version.xpu", xpu, create=True),
         patch("openrlhf.utils.distributed_util.dist_xccl_available", return_value=xccl),
-        patch("torch.xpu.device_count", return_value=xpu_count, create=True),
+        _patch_count(xpu_count),
     )
 
 
 @pytest.mark.parametrize(
     "cuda,hip,xpu,xccl,xpu_count,requested,expected",
     [
-        # auto-detect (unset): nccl on CUDA/ROCm; xccl on XPU with >=2 devices; else gloo
+        # auto-detect (unset): nccl on CUDA/ROCm; gloo everywhere else. XPU auto stays gloo (the
+        # safe, known-working default) EVEN with >=2 devices - xccl is opt-in only, because
+        # torch 2.12.0+xpu segfaults in ProcessGroupXCCL on Battlemage/PCIe (torch-xpu-ops #4238).
         ("12.1", None, None, False, 1, None, "nccl"),   # CUDA -> nccl
         (None, "6.0", None, False, 1, None, "nccl"),    # ROCm -> nccl
-        (None, None, "20250", True, 2, None, "xccl"),   # XPU + xccl + 2 devices -> xccl (direct XPU->XPU)
-        (None, None, "20250", True, 8, None, "xccl"),   # XPU + xccl + 8 devices -> xccl
-        (None, None, "20250", True, 1, None, "gloo"),   # XPU + xccl + 1 device  -> gloo (single-tile can't xccl)
+        (None, None, "20250", True, 2, None, "gloo"),   # XPU + xccl + 2 devices -> gloo (xccl NOT auto)
+        (None, None, "20250", True, 8, None, "gloo"),   # XPU + xccl + 8 devices -> gloo (xccl NOT auto)
+        (None, None, "20250", True, 1, None, "gloo"),   # XPU + xccl + 1 device  -> gloo
         (None, None, "20250", False, 1, None, "gloo"),  # XPU without xccl -> gloo
         (None, None, None, False, 1, None, "gloo"),     # nothing detected -> gloo
         # explicit
