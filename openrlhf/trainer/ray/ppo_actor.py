@@ -373,9 +373,9 @@ class ActorPPOTrainer(ABC):
         if self.ema_model:
             if self.args.train.dynamic_batch_enable:
                 if self.replay_buffer.dynamic_optimizer_step[step]:
-                    self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")
+                    self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, torch.accelerator.current_accelerator().type)
             else:
-                self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")
+                self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, torch.accelerator.current_accelerator().type)
 
         # Per-token losses (0-D tensors, shape carries weighting info for ppo_train)
         metrics = {"policy_loss": actor_loss.detach()}
@@ -427,6 +427,32 @@ class ActorPPOTrainer(ABC):
 
         torch.accelerator.empty_cache()
         model = self.actor.model.module
+
+        # Weight-freshness probe: log actor-side checksums before broadcast.
+        # Activated by OPENRLHF_WEIGHT_PROBE=1. Runs inside the worker process.
+        import os as _os
+        if _os.environ.get("OPENRLHF_WEIGHT_PROBE") == "1" and torch.distributed.get_rank() == 0:
+            import logging as _log
+            _logger = _log.getLogger("weight_freshness")
+            _gen = getattr(self, "_probe_gen", 0)
+            _params = list(model.named_parameters())
+            _track = ("input_layernorm.weight", "self_attn.q_proj.weight", "lm_head.weight")
+            _zero3 = self.strategy.args.ds.zero_stage == 3
+            import deepspeed as _ds
+            _first, _last = _params[0][0] if _params else None, _params[-1][0] if _params else None
+            _logged = 0
+            for _n, _p in _params:
+                _is_f, _is_l = _n == _first, _n == _last
+                if not (_is_f or _is_l or any(_n.endswith(s) for s in _track)):
+                    continue
+                with _ds.zero.GatheredParameters([_p], enabled=_zero3):
+                    _chk = f"{_p.detach().float().cpu().sum().item():.6f}"
+                _tag = ("[FIRST]" if _is_f else "") + ("[LAST]" if _is_l else "")
+                _logger.info("ACTOR  gen=%d  %s%s  chk=%s", _gen, _n, _tag, _chk)
+                _logged += 1
+                if _logged >= 8:
+                    break
+            self._probe_gen = _gen + 1
         # TP gather always needs the top-level (possibly PeftModel) module.
         tp_model = model
 

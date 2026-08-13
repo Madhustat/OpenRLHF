@@ -31,6 +31,7 @@ def train(args):
                     "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
                     "CCL_LOG_LEVEL": os.environ.get("CCL_LOG_LEVEL", "warn"),
                     "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
+                    "OPENRLHF_WEIGHT_PROBE": os.environ.get("OPENRLHF_WEIGHT_PROBE", "0"),
                 }
             }
         )

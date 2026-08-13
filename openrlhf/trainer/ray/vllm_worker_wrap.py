@@ -53,6 +53,24 @@ class WorkerWrap:
 
         self.model_runner.model.load_weights(weights=[(name, weight)])
 
+        # Weight-freshness probe: checksum the weight just loaded into vLLM.
+        import os as _os
+        if _os.environ.get("OPENRLHF_WEIGHT_PROBE") == "1":
+            _track = ("input_layernorm.weight", "self_attn.q_proj.weight", "lm_head.weight")
+            _first = not getattr(self, "_probe_recv_count", False)
+            self._probe_recv_count = getattr(self, "_probe_recv_count", 0) + 1
+            if _first or any(name.endswith(s) for s in _track):
+                import logging as _log
+                _logger = _log.getLogger("weight_freshness")
+                try:
+                    _state = dict(self.model_runner.model.named_parameters())
+                    if name in _state:
+                        _chk = f"{_state[name].detach().float().cpu().sum().item():.6f}"
+                        _gen = getattr(self, "_probe_gen_seen", 0)
+                        _logger.info("vLLM   gen=%d  %s  chk=%s", _gen, name, _chk)
+                except Exception as _e:
+                    pass
+
         del weight
         # TODO: should we empty cache if all weights have updated?
         # if empty_cache:

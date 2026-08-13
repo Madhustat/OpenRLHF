@@ -155,3 +155,5 @@ wandb
 *tmp*
 # End-to-end validation: keep scripts + summary .md, ignore bulky raw run logs
 docs/logs_of_end_end_tests/**/*.log
+# E2E suite run outputs (logs + per-test results)
+tests/results/

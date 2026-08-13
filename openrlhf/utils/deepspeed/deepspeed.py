@@ -364,6 +364,12 @@ class DeepspeedStrategy(ABC):
                     "betas": list(adam["betas"]),
                     "eps": adam["eps"],
                     "weight_decay": adam["weight_decay"],
+                    # Opt-in escape hatch: force DeepSpeed to use torch's native AdamW instead of
+                    # its custom fused XPU op. On torch 2.13.dev+xpu the DeepSpeed FusedAdam/CPUAdam
+                    # SYCL ops segfault when JIT-compiled (fused_adam.py -> builder.jit_load). Set
+                    # OPENRLHF_DS_TORCH_ADAM=1 to opt out of the fused op on such builds. Defaults
+                    # OFF so the working torch-2.12 path is byte-for-byte unchanged.
+                    **({"torch_adam": True} if os.environ.get("OPENRLHF_DS_TORCH_ADAM", "0") == "1" else {}),
                 },
             }
         scheduler_steps = cfg["scheduler_steps"]
