@@ -311,6 +311,7 @@ run_ppo_test "dapo_nocolo" \
     --actor.eps_clip_low_high 0.2 0.27 \
     --ref.num_nodes 1 --ref.num_gpus_per_node 1 --train.colocate_actor_ref \
     --rollout.n_samples_per_prompt 4 --rollout.batch_size 8 \
+    --data.max_samples 400 \
     --ds.zero_stage 2 --ds.adam_offload
 
 # ProRL v2: REINFORCE++-baseline + clip-higher + dynamic filtering.
@@ -323,6 +324,7 @@ run_ppo_test "prorlv2_nocolo" \
     --actor.eps_clip_low_high 0.2 0.27 \
     --ref.num_nodes 1 --ref.num_gpus_per_node 1 --train.colocate_actor_ref \
     --rollout.n_samples_per_prompt 4 --rollout.batch_size 8 \
+    --data.max_samples 400 \
     --ds.zero_stage 2 --ds.adam_offload
 
 # Async GRPO: generation and backward pass overlap in time, using
