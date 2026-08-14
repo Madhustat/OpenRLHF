@@ -1,6 +1,7 @@
 import os
 import socket
 from abc import ABC
+from contextlib import ExitStack
 from dataclasses import fields
 from typing import Dict, List, Optional, Union
 
@@ -21,7 +22,11 @@ from openrlhf.utils.deepspeed.deepspeed_utils import (
     offload_deepspeed_states,
     reload_deepspeed_states,
 )
-from openrlhf.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
+from openrlhf.utils.distributed_util import (
+    resolve_vllm_sync_backend,
+    stateless_init_process_group,
+    torch_dist_barrier_and_accelerator_sync,
+)
 from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.loss_utils import get_loss_batch_info, iter_grad_accum_global_norm
 from openrlhf.utils.vlm_utils import merge_mm_train_inputs
@@ -98,14 +103,19 @@ class ActorPPOTrainer(ABC):
             self.args.train.dynamic_batch_enable,
         )
 
-        # Init torch group for weights sync
-        backend = getattr(self.strategy.args.vllm, "sync_backend", "nccl")
-        self.use_cuda_ipc = backend == "nccl" and self.args.train.colocate_all and not self.args.train.async_enable
+        # Init torch group for weights sync. Resolve the backend once (auto-detect when unset,
+        # strict on explicit) so downstream decisions - especially CUDA IPC - use the effective
+        # backend, not the raw config value.
+        configured_backend = getattr(self.strategy.args.vllm, "sync_backend", None)
+        self.vllm_sync_backend = resolve_vllm_sync_backend(configured_backend)
+        self.use_cuda_ipc = (
+            self.vllm_sync_backend == "nccl" and self.args.train.colocate_all and not self.args.train.async_enable
+        )
 
         if self.vllm_engines is not None and not self.use_cuda_ipc and torch.distributed.get_rank() == 0:
-            self._init_vllm_sync_group(backend)
+            self._init_vllm_sync_group(self.vllm_sync_backend)
 
-        torch_dist_barrier_and_cuda_sync()
+        torch_dist_barrier_and_accelerator_sync()
 
     def _init_vllm_sync_group(self, backend: str):
         """Create a torch process group between DeepSpeed rank 0 and all vLLM engine ranks.
@@ -146,8 +156,10 @@ class ActorPPOTrainer(ABC):
             collective.init_collective_group(world_size=world_size, rank=0, backend=backend, group_name=group_name)
             self._model_update_group = group_name
         else:
+            accelerator = torch.accelerator.current_accelerator()
+            device = torch.device(accelerator.type, torch.accelerator.current_device_index())
             self._model_update_group = stateless_init_process_group(
-                master_address, master_port, 0, world_size, torch.cuda.current_device()
+                master_address, master_port, 0, world_size, device, backend=backend
             )
 
         ray.get(refs)
@@ -170,7 +182,7 @@ class ActorPPOTrainer(ABC):
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_device_index()
 
         status_list = []
         status_mean = {}
@@ -361,9 +373,9 @@ class ActorPPOTrainer(ABC):
         if self.ema_model:
             if self.args.train.dynamic_batch_enable:
                 if self.replay_buffer.dynamic_optimizer_step[step]:
-                    self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")
+                    self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, torch.accelerator.current_accelerator().type)
             else:
-                self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")
+                self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, torch.accelerator.current_accelerator().type)
 
         # Per-token losses (0-D tensors, shape carries weighting info for ppo_train)
         metrics = {"policy_loss": actor_loss.detach()}
@@ -413,17 +425,19 @@ class ActorPPOTrainer(ABC):
             for engine in self.vllm_engines:
                 cache_reset_refs.append(engine.reset_prefix_cache.remote())
 
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         model = self.actor.model.module
-        count = 0
 
-        def _broadcast_param(param, count, num_params):
+        # TP gather always needs the top-level (possibly PeftModel) module.
+        tp_model = model
+
+        def _broadcast_param(name, param, do_empty):
             use_ray = getattr(self.strategy.args.vllm, "sync_with_ray", False)
             # Fire all vllm engines for broadcast
             if torch.distributed.get_rank() == 0:
                 shape = param.shape if self.strategy.args.ds.zero_stage != 3 else param.ds_shape
                 refs = [
-                    engine.update_weight.remote(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params)
+                    engine.update_weight.remote(name, dtype=param.dtype, shape=shape, empty_cache=do_empty)
                     for engine in self.vllm_engines
                 ]
 
@@ -432,10 +446,14 @@ class ActorPPOTrainer(ABC):
 
                     collective.broadcast(param.data, 0, group_name=self._model_update_group)
                 else:
-                    self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                    # Preserve the explicit CUDA stream on the NCCL path; the gloo fallback
+                    # accepts stream=None and ignores it. Both communicators broadcast into
+                    # param.data in place and return the same tensor.
+                    stream = torch.cuda.current_stream() if self.vllm_sync_backend == "nccl" else None
+                    self._model_update_group.broadcast(param.data, src=0, stream=stream)
                 ray.get(refs)
 
-        def _handle_cuda_ipc(param, count, num_params):
+        def _handle_cuda_ipc(name, param, do_empty):
             from torch.multiprocessing.reductions import reduce_tensor
 
             weight = param.data.clone()
@@ -457,36 +475,114 @@ class ActorPPOTrainer(ABC):
                         dtype=param.dtype,
                         shape=shape,
                         ipc_handles=ipc_handles,
-                        empty_cache=count == num_params,
+                        empty_cache=do_empty,
                     )
                     for engine in self.vllm_engines
                 ]
                 ray.get(refs)
-            torch_dist_barrier_and_cuda_sync()
+            torch_dist_barrier_and_accelerator_sync()
 
-        def _gather_params_ctx(param):
+        def _param_gather_ctx(param, need_gather):
             """Context manager that gathers sharded/TP-split parameters for weight sync."""
             if self.strategy.args.ds.tensor_parallel_size > 1:
-                return deepspeed.module_inject.layers.GatherReplacedLayerParams([param], model, enabled=True)
-            return deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.ds.zero_stage == 3)
+                return deepspeed.module_inject.layers.GatherReplacedLayerParams([param], tp_model, enabled=True)
+            return deepspeed.zero.GatheredParameters([param], enabled=need_gather)
 
         sync_fn = _handle_cuda_ipc if self.use_cuda_ipc else _broadcast_param
 
-        # VLM: only sync trainable (language model) params — vision encoder is frozen.
-        params_to_sync = [
-            (n, p) for n, p in model.named_parameters() if p.requires_grad or not getattr(self.actor, "is_vlm", False)
-        ]
-        num_params = len(params_to_sync)
+        def _broadcast_module(module, prefix, empty_cache_on_last, need_gather):
+            named = list(module.named_parameters(prefix=prefix))
+            n = len(named)
+            for c, (pname, param) in enumerate(named, start=1):
+                do_empty = empty_cache_on_last and c == n
+                with _param_gather_ctx(param, need_gather):
+                    sync_fn(pname, param, do_empty)
 
-        for name, param in params_to_sync:
-            count += 1  # empty_cache at last param
-            with _gather_params_ctx(param):
-                sync_fn(param, count, num_params)
+        # LoRA: PEFT wraps params as `base_model.model...`, which vLLM cannot map to its
+        # own `model.layers...` names, and the adapter deltas must be folded into the base
+        # weights before sync. So for a PeftModel we merge each LoRA module's adapter into
+        # its base layer, broadcast the merged base weights (correct names + values), then
+        # unmerge. Mirrors OpenRLHF PR #869. Non-LoRA path below is unchanged.
+        from peft.peft_model import PeftModel
+
+        if isinstance(model, PeftModel):
+            lora_model = model.base_model
+            base_model = lora_model.model  # strips the `base_model.` name prefix
+            leaf_modules = self._get_leaf_modules(base_model, use_lora=True)
+            num_modules = len(leaf_modules)
+            zero3 = self.strategy.args.ds.zero_stage == 3
+            for idx, (key, module) in enumerate(leaf_modules, start=1):
+                empty_cache_on_last = idx == num_modules
+                with ExitStack() as stack:
+                    need_gather = zero3
+                    module_name = key.split(".")[-1]
+                    if hasattr(module, "base_layer"):
+                        # LoRA module: gather (if ZeRO-3), merge adapter into base layer,
+                        # broadcast the merged base layer, then unmerge on exit.
+                        stack.enter_context(
+                            deepspeed.zero.GatheredParameters(list(module.parameters()), enabled=need_gather)
+                        )
+                        module.merge(safe_merge=True)
+                        fake_parent = type("FakeParent", (), {})()
+                        lora_model._replace_module(fake_parent, module_name, module.get_base_layer(), module)
+                        merged = getattr(fake_parent, module_name)
+                        stack.callback(module.unmerge)
+                        # Params already gathered/merged in full -> no further gather.
+                        _broadcast_module(merged, prefix=key, empty_cache_on_last=empty_cache_on_last, need_gather=False)
+                    else:
+                        _broadcast_module(
+                            module, prefix=key, empty_cache_on_last=empty_cache_on_last, need_gather=need_gather
+                        )
+        else:
+            # VLM: only sync trainable (language model) params — vision encoder is frozen.
+            params_to_sync = [
+                (n, p)
+                for n, p in model.named_parameters()
+                if p.requires_grad or not getattr(self.actor, "is_vlm", False)
+            ]
+            num_params = len(params_to_sync)
+            zero3 = self.strategy.args.ds.zero_stage == 3
+            for count, (name, param) in enumerate(params_to_sync, start=1):
+                with _param_gather_ctx(param, need_gather=zero3):
+                    sync_fn(name, param, count == num_params)
 
         if cache_reset_refs:
             ray.get(cache_reset_refs)
-        torch.cuda.empty_cache()
-        torch_dist_barrier_and_cuda_sync()
+        torch.accelerator.empty_cache()
+        torch_dist_barrier_and_accelerator_sync()
+
+    def _get_leaf_modules(self, root, use_lora):
+        """Return (name, module) leaf modules for weight sync.
+
+        A leaf is a module with no children, or (under LoRA) a module that owns a
+        `base_layer` (i.e. a LoRA-wrapped layer). Parameters attached directly to an
+        intermediate module (not in any submodule) are wrapped so they sync uniformly.
+        LoRA bookkeeping params (lora_A/lora_B/base_layer.*) are skipped — their effect
+        is folded into the base weights via merge(). Mirrors OpenRLHF PR #869.
+        """
+        lora_module_keyword = ["lora_", "base_layer"]
+
+        class IsoParamWrapper:
+            def __init__(self, name, parameter):
+                self.name = name
+                self.parameter = parameter
+
+            def named_parameters(self, prefix=None):
+                # self.name is already the full name; ignore prefix.
+                return [(self.name, self.parameter)]
+
+        leaf_modules = []
+        for name, module in root.named_modules():
+            if len(list(module.children())) == 0 or (use_lora and hasattr(module, "base_layer")):
+                leaf_modules.append((name, module))
+            else:
+                for pname, p in module.named_parameters(recurse=False, prefix=name):
+                    leaf_modules.append((pname, IsoParamWrapper(pname, p)))
+        if use_lora:
+            leaf_modules = [
+                (n, m) for n, m in leaf_modules if not any(keyword in n for keyword in lora_module_keyword)
+            ]
+        return leaf_modules
 
 
 @ray.remote(num_gpus=1)
@@ -500,7 +596,9 @@ class PolicyModelActor(BaseModelActor):
 
         # Skip for vLLM >= 0.16 where NCCL_CUMEM_ENABLE=0 causes ncclCommInitRank to fail
         # with "unhandled cuda error" under NCCL 2.27+.
-        if getattr(args.vllm, "sync_backend", "nccl") == "nccl":
+        # Only relevant when vLLM engines are actually in use - vllm may not be
+        # installed at all when running with --vllm.num_engines 0.
+        if vllm_engines and resolve_vllm_sync_backend(getattr(args.vllm, "sync_backend", None)) == "nccl":
             import vllm
             from packaging import version as pkg_version
 
@@ -596,12 +694,12 @@ class PolicyModelActor(BaseModelActor):
 
     def fit(self, kl_ctl: float = 0):
         """Train actor model with the replay buffer."""
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         self.actor.train()
         status = self.trainer.ppo_train(kl_ctl)
         self.trainer.replay_buffer.clear()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()
+        torch.accelerator.synchronize()
         return status
 
     def save_model(self):
@@ -623,7 +721,7 @@ class PolicyModelActor(BaseModelActor):
         mm_train_inputs_list=None,
     ) -> torch.Tensor:
         """Generates actor values."""
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_device_index()
 
         # VLM: merge pre-processed multimodal inputs from all samples in batch
         mm_inputs = {}
@@ -679,4 +777,4 @@ class PolicyModelActor(BaseModelActor):
                 save_path,
             )
         # wait
-        torch_dist_barrier_and_cuda_sync()
+        torch_dist_barrier_and_accelerator_sync()
