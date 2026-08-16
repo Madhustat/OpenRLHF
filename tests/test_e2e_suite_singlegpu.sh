@@ -7,15 +7,16 @@
 # colocate_all + enable_sleep so the actor and vLLM engine time-share the
 # one available GPU. Supervised tests (SFT/RM/DPO) already use 1 GPU natively.
 #
-# Covers 18 configurations across 7 groups:
+# Covers 18 configurations across 6 groups:
 #
 #   Group 1  — GRPO (colocate_all + sleep)    — baseline, LoRA, KL penalty
 #   Group 2  — Other RL algorithms            — REINFORCE, REINFORCE++, RLOO, DR-GRPO
 #   Group 3  — Reward shaping                 — overlong penalty, reward norm, IS correction
 #   Group 4  — EMA checkpoint
-#   Group 5  — Async GRPO
-#   Group 6  — SFT                            — full fine-tune, LoRA, sample packing
-#   Group 7  — Reward Model + DPO / IPO / cDPO
+#   Group 5  — SFT                            — full fine-tune, LoRA, sample packing
+#   Group 6  — Reward Model + DPO / IPO / cDPO
+#
+# Async GRPO is NOT included here — it requires >=2 GPUs (see multi-GPU suite).
 #
 # Hardware: 1 physical GPU (tested on Arc Pro B70 XPU, also valid on NVIDIA)
 # Model:    Qwen/Qwen2.5-0.5B
@@ -48,16 +49,68 @@
 set -uo pipefail
 
 # ──────────────────────────────────────────────────────────────────────────────
+# LOCAL ADAPTATIONS for this single-XPU box (dut7054) — 2026-08
+# ──────────────────────────────────────────────────────────────────────────────
+# This suite was authored on a different box (user sdp). The changes below adapt
+# it to this machine. Result after adaptation: 18/18 PASS. None of the original
+# failures were code defects — all were environment/config/architecture:
+#
+#   1. REPO / VENV repointed to this box's checkout + venv-tf (paths below).
+#   2. PYTHONPATH prepends REPO — the venv's editable openrlhf points at a
+#      different checkout, so this forces imports to resolve to THIS repo.
+#   3. SFT_DATA repointed to /tmp/gsm8k_sft/train.parquet (the sdp path does not
+#      exist here). See PREREQUISITES below to (re)generate it.
+#   4. sg_grpo_kl: added `--ref.num_nodes 1 --ref.num_gpus_per_node 1` so the
+#      colocated reference model matches the actor's single GPU (otherwise the
+#      ref model defaults to 8 GPUs and trips a colocate assertion). CONFIG, not code.
+#   5. sample-packing (sg_sft_packing) needs the `kernels` pip package pinned to
+#      0.15.2 <= v < 0.16.0. This box had 0.16.0; downgrade once:
+#          pip install "kernels==0.15.2"
+#      DEPENDENCY VERSION, not code.
+#   6. Async GRPO REMOVED from this suite — it requires >=2 GPUs (async overlaps
+#      vLLM generation with actor training on separate devices; async+sleep is
+#      disallowed and async+colocate-no-sleep deadlocks on one device). It is
+#      validated as `grpo_async` in test_e2e_suite_multigpu.sh. ARCHITECTURE, not code.
+#
+# PREREQUISITES (run once before the suite; both use the venv above):
+#   # RL prompts -> $PROMPTS
+#   python - <<'PY'
+#   from datasets import load_dataset; import json
+#   ds = load_dataset("openai/gsm8k","main",split="train").select(range(400))
+#   sfx=" Please reason step by step, and put your final answer within \\boxed{}."
+#   with open("gsm8k_train_prompts.jsonl","w") as f:
+#       for r in ds: f.write(json.dumps({"prompt":r["question"]+sfx,
+#           "label":r["answer"].split("####")[-1].strip().replace(",","")})+"\n")
+#   PY
+#   # SFT parquet ('messages' chat format) -> $SFT_DATA
+#   mkdir -p /tmp/gsm8k_sft
+#   python - <<'PY'
+#   from datasets import load_dataset; import pandas as pd
+#   ds = load_dataset("openai/gsm8k","main",split="train").select(range(256))
+#   rows=[{"messages":[{"role":"user","content":r["question"]},
+#          {"role":"assistant","content":r["answer"]}]} for r in ds]
+#   pd.DataFrame(rows).to_parquet("/tmp/gsm8k_sft/train.parquet")
+#   PY
+#   pip install "kernels==0.15.2"   # required for sg_sft_packing
+#
+# (RM/DPO download PREF_DATA from HuggingFace on first run — needs network.)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-REPO=/home/sdp/madhu/OpenRLHF-multi
-VENV=/home/sdp/madhu/openrlhf_exp/OpenRLHF/venv-tf
+REPO=/home/dut7054/madhu/OpenRLHF_exp_multi
+VENV=/home/dut7054/madhu/work2_with_transformers_native/OpenRLHF/venv-tf
 MODEL=Qwen/Qwen2.5-0.5B
 REWARD_FN=$REPO/examples/python/math_reward_func.py
 PROMPTS=$REPO/gsm8k_train_prompts.jsonl
-SFT_DATA=/home/sdp/data/gsm8k_sft/train.parquet
+SFT_DATA=/tmp/gsm8k_sft/train.parquet
 PREF_DATA=OpenRLHF/preference_dataset_mixture2_and_safe_pku
+
+# Force the interpreter to use THIS checkout's openrlhf (the venv's editable
+# install points at a different checkout; prepend REPO so imports resolve here).
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
 # XPU device environment — use only the first device for single-GPU runs
 export PATH="/opt/intel/oneapi/compiler/2025.3/bin:$VENV/bin:$PATH"
@@ -229,6 +282,7 @@ run_rl_singlegpu_test "sg_grpo_kl" \
     --algo.advantage.estimator group_norm \
     --algo.kl.init_coef 0.01 --algo.kl.use_loss --algo.kl.estimator k3 \
     --rollout.n_samples_per_prompt 4 --rollout.batch_size 8 \
+    --ref.num_nodes 1 --ref.num_gpus_per_node 1 \
     --ds.zero_stage 2 --ds.adam_offload
 
 # ── Group 2: Other RL algorithms ──────────────────────────────────────────────
@@ -292,17 +346,13 @@ run_rl_singlegpu_test "sg_grpo_ema" \
     --train.enable_ema --train.ema_beta 0.992 \
     --ds.zero_stage 2 --ds.adam_offload
 
-# ── Group 5: Async GRPO ───────────────────────────────────────────────────────
-# Async decouples generation from training — also valid on a single GPU.
+# NOTE: Async GRPO is intentionally NOT in the single-GPU suite. Async mode
+# overlaps vLLM generation with actor training, which requires them on separate
+# devices (>=2 GPUs): async + vLLM sleep mode is disallowed by OpenRLHF, and
+# async + colocate_all without sleep deadlocks on a single device. It is
+# validated as `grpo_async` in test_e2e_suite_multigpu.sh.
 
-run_rl_singlegpu_test "sg_grpo_async" \
-    "Async GRPO, colocate_all + sleep — generation overlaps backward pass on 1 GPU" \
-    --algo.advantage.estimator group_norm --algo.kl.init_coef 0 \
-    --rollout.n_samples_per_prompt 4 --rollout.batch_size 8 \
-    --train.async_enable \
-    --ds.zero_stage 2 --ds.adam_offload
-
-# ── Group 6: SFT ──────────────────────────────────────────────────────────────
+# ── Group 5: SFT ──────────────────────────────────────────────────────────────
 # Pure DeepSpeed — no Ray, no vLLM. Already 1-GPU by design.
 
 run_supervised_test "sg_sft_zero2" \
@@ -340,7 +390,7 @@ run_supervised_test "sg_sft_packing" \
     --ckpt.output_dir /tmp/sg_sft_packing --ckpt.save_steps -1 \
     --eval.steps -1
 
-# ── Group 7: Reward Model + DPO / IPO / cDPO ─────────────────────────────────
+# ── Group 6: Reward Model + DPO / IPO / cDPO ─────────────────────────────────
 
 run_supervised_test "sg_rm_zero2" \
     "Reward Model, ZeRO-2 on 1 GPU — preference pair binary cross-entropy" \
