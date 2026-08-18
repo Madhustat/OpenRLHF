@@ -29,29 +29,34 @@ See `TESTS.md` for a full description of every test.
 | Component | Version used |
 |---|---|
 | PyTorch | 2.12.0+xpu |
-| vLLM | 0.23.1rc1 |
+| vLLM | 0.23.1rc1 (source build — see INSTALL_XPU.md) |
 | Ray | 2.55.0 |
 | oneAPI compiler | 2025.3 |
-| Python environment | `/home/sdp/madhu/openrlhf_exp/OpenRLHF/venv-tf` |
+
+See [../docs/xpu_experimental/INSTALL_XPU.md](../docs/xpu_experimental/INSTALL_XPU.md)
+to build this exact environment from scratch.
 
 ---
 
-## Step 1 — Open a terminal and set up the environment
+## Step 1 — Open a terminal and activate your environment
 
-Every time you open a **new terminal**, run these three exports before doing
-anything else. They activate the Intel oneAPI compiler and the Python
-environment, and tell the XPU driver which devices are visible.
+Activate whatever Python environment has the stack from INSTALL_XPU.md (conda
+env or venv), then set the two XPU device variables. The suites find `python`
+and `ray` on your `PATH`; override with `PYTHON=... RAY=...` if they live
+elsewhere.
 
 ```bash
-export PATH="/opt/intel/oneapi/compiler/2025.3/bin:/home/sdp/madhu/openrlhf_exp/OpenRLHF/venv-tf/bin:$PATH"
+conda activate openrlhf-xpu          # or: source <your-venv>/bin/activate
 export ONEAPI_DEVICE_SELECTOR=level_zero:0,1
 export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1
 ```
 
 **Why each one is needed:**
-- `PATH` — puts `icpx` (Intel C++ compiler, used by DeepSpeed JIT) and `python`/`ray` from the venv first.
 - `ONEAPI_DEVICE_SELECTOR` — makes both Arc Pro B70 GPUs visible (device 0 and device 1). Without this, only one may appear.
 - `RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR` — prevents Ray from overriding the device selector inside worker processes (Ray misdetects Arc Pro B70 as NVIDIA and would set the wrong variable).
+
+The suites prepend the oneAPI 2025.3 compiler dir to `PATH` automatically if it
+exists at `/opt/intel/oneapi/compiler/2025.3/bin` (needed for the DeepSpeed JIT).
 
 **Verify the setup:**
 ```bash
@@ -68,8 +73,14 @@ python -c "import torch; print(torch.__version__); print(torch.xpu.device_count(
 All test commands must be run from the repo root:
 
 ```bash
-cd /home/sdp/madhu/OpenRLHF-multi
+cd <your-clone>/OpenRLHF-multi
 ```
+
+> **Datasets are automatic.** The RL prompts and SFT parquet are generated from
+> GSM8K into `tests/data/` the first time you launch a suite (via
+> `tests/prepare_e2e_data.py`). The first run needs network for the GSM8K
+> download; after that it is cached. The only manual data step is the VLM model
+> in Step 5 (used by one test).
 
 ---
 
@@ -113,7 +124,7 @@ ps aux | grep -iE "train_ppo_ray|EngineCore|PolicyModelActor|RolloutRayActor" | 
 # Expected: no output (no leftover processes)
 
 # Check Ray is stopped
-/home/sdp/madhu/openrlhf_exp/OpenRLHF/venv-tf/bin/ray stop --force 2>/dev/null
+ray stop --force 2>/dev/null
 rm -rf /tmp/ray
 ```
 
@@ -291,7 +302,7 @@ Most likely a stale process from a previous run is holding GPU memory.
 
 ```bash
 # Kill everything and clean up
-/home/sdp/madhu/openrlhf_exp/OpenRLHF/venv-tf/bin/ray stop --force
+ray stop --force
 pkill -9 -f "train_ppo_ray|EngineCore|PolicyModelActor|RolloutRayActor|ray::"
 sleep 5
 rm -rf /tmp/ray /tmp/e2e_* /tmp/sg_*
@@ -335,19 +346,16 @@ export HF_DATASETS_CACHE=/tmp/hf_datasets_fresh
 ```
 
 ### `ray.exceptions.RuntimeError: Version mismatch`
-The system `ray` binary (from conda) is a different version than the one in
-the venv. Always use the venv's ray:
+A different `ray` binary is on `PATH` than the one in your active environment.
+Activate the correct environment first, or point the suites at the right one:
 
 ```bash
-# Wrong:
-ray start --head --num-gpus=2
-
-# Correct:
-/home/sdp/madhu/openrlhf_exp/OpenRLHF/venv-tf/bin/ray start --head --num-gpus=2
+RAY=/path/to/env/bin/ray PYTHON=/path/to/env/bin/python \
+  bash tests/test_e2e_suite_multigpu.sh
 ```
 
-The test suites call `$VENV/bin/ray` internally, so this only affects manual
-Ray commands you run outside the suites.
+The suites use `ray`/`python` from `PATH` by default; `RAY=` / `PYTHON=`
+override them for both the suite and its manual Ray commands.
 
 ### `grad_accum = 0` assertion
 `train.batch_size` is too small for the number of actor GPUs:
@@ -364,7 +372,7 @@ giving `grad_accum=2`. If you change GPU counts manually, scale accordingly.
 If this is the first time running on a freshly set-up machine:
 
 ```bash
-# 1. Confirm the venv has the right packages
+# 1. Confirm the environment has the right packages
 python -c "import torch, vllm, ray, deepspeed; print('all imports OK')"
 
 # 2. Download the VLM model (multi-GPU suite only)
@@ -374,9 +382,9 @@ snapshot_download('Qwen/Qwen2-VL-2B-Instruct',
                   local_dir='/tmp/hf_vlm_clean/Qwen2-VL-2B-Instruct')
 "
 
-# 3. Confirm datasets are present
-ls /home/sdp/madhu/OpenRLHF-multi/gsm8k_train_prompts.jsonl
-ls /home/sdp/data/gsm8k_sft/train.parquet
+# 3. RL/SFT datasets are generated automatically on first suite launch.
+#    To pre-generate them explicitly (optional):
+python tests/prepare_e2e_data.py
 
 # 4. Run unit tests first (quick sanity check, no GPU needed)
 python -m pytest tests/ -q --ignore=tests/results
