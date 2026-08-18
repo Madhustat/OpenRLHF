@@ -1,6 +1,9 @@
-# OpenRLHF XPU Test Suite
+# OpenRLHF Test Suite (Intel XPU + NVIDIA CUDA)
 
 This document describes every test in the repository, how to run them, and what each one validates.
+
+The multi-GPU E2E suite auto-detects the accelerator: NVIDIA CUDA uses `nccl`
+weight-sync, Intel XPU uses `gloo`. See [HOW_TO_RUN.md](HOW_TO_RUN.md) for details.
 
 ## Quick start
 
@@ -8,7 +11,7 @@ This document describes every test in the repository, how to run them, and what 
 # Unit tests — no GPU required, ~40 s
 python -m pytest tests/ -q
 
-# E2E suite — Multi-GPU (2x Arc Pro B70) — 28 tests, ~2 hrs
+# E2E suite — Multi-GPU (2 GPUs, XPU or NVIDIA) — 28 tests, ~2 hrs
 bash tests/test_e2e_suite_multigpu.sh
 
 # E2E suite — Single GPU — 19 tests, ~1 hr
@@ -31,12 +34,18 @@ python -m pytest tests/ -q
 # Expected: 86 passed
 ```
 
-### Environment setup (XPU box)
+### Environment setup
+
+Activate the environment from
+[../docs/xpu_experimental/INSTALL_XPU.md](../docs/xpu_experimental/INSTALL_XPU.md),
+then on an **XPU box** also export:
 
 ```bash
-export PATH="/opt/intel/oneapi/compiler/2025.3/bin:venv-tf/bin:$PATH"
 export ONEAPI_DEVICE_SELECTOR=level_zero:0,1
 ```
+
+On an NVIDIA box no extra exports are needed — the suite sets
+`CUDA_VISIBLE_DEVICES` and the nccl backend itself.
 
 ---
 
@@ -196,11 +205,15 @@ Each test runs for 10 steps (or until the dataset is exhausted for supervised te
 
 ### Environment setup
 
+Activate your environment, then on an **XPU box** export the device selector
+(the suite sets the Ray guard and backend itself):
+
 ```bash
-export PATH="/opt/intel/oneapi/compiler/2025.3/bin:venv-tf/bin:$PATH"
 export ONEAPI_DEVICE_SELECTOR=level_zero:0,1
-export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1
 ```
+
+On an **NVIDIA box** no extra exports are needed — the suite auto-detects CUDA
+and sets `CUDA_VISIBLE_DEVICES`, `nccl`, and `DS_SKIP_CUDA_CHECK=1`.
 
 ### VLM prerequisite (Group 6 only)
 
@@ -370,6 +383,7 @@ The requested GPU count exceeds what is available. Verify `ray start --num-gpus=
 matches the physical GPU count. On this box `N=2`. The `ppo_gae` test requires
 3 GPUs and will hang on a 2-GPU box — it is excluded from the suite for this reason.
 
-**Version mismatch: `ray` from conda shadows venv's ray**
-Always use `venv-tf/bin/ray` directly. `which ray` may point to a different
-version; calling bare `ray` after sourcing can cause `RuntimeError: Version mismatch`.
+**Version mismatch: a different `ray` shadows your environment's ray**
+Activate the correct environment, or point the suite at the right binaries with
+`RAY=/path/to/env/bin/ray PYTHON=/path/to/env/bin/python bash tests/...`. A bare
+`ray` on `PATH` from another env can cause `RuntimeError: Version mismatch`.
