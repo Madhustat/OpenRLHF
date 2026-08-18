@@ -43,27 +43,40 @@ set -uo pipefail
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-REPO=/home/sdp/madhu/OpenRLHF-multi
-VENV=/home/sdp/madhu/openrlhf_exp/OpenRLHF/venv-tf
+# Repo root is derived from this script's location so the suite runs from any
+# clone. Interpreter/launcher and paths are overridable via env for other boxes.
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PYTHON=${PYTHON:-python}
+RAY=${RAY:-ray}
 
 # Default model for all RL/SFT/RM/DPO tests (small, fast, cached locally)
-MODEL=Qwen/Qwen2.5-0.5B
+MODEL=${MODEL:-Qwen/Qwen2.5-0.5B}
 
-# VLM model — downloaded to /tmp to avoid root-owned HF cache locks from Docker
-VLM_MODEL=/tmp/hf_vlm_clean/Qwen2-VL-2B-Instruct
+# VLM model — local snapshot dir (avoids root-owned HF cache locks in Docker).
+# Download once: python -c "from huggingface_hub import snapshot_download; \
+#   snapshot_download('Qwen/Qwen2-VL-2B-Instruct', local_dir='$VLM_MODEL')"
+VLM_MODEL=${VLM_MODEL:-/tmp/hf_vlm_clean/Qwen2-VL-2B-Instruct}
 
 # Reward function used by all RL tests (math \boxed{} answer extraction)
 REWARD_FN=$REPO/examples/python/math_reward_func.py
 
-# Datasets
-PROMPTS=$REPO/gsm8k_train_prompts.jsonl              # RL: 80 GSM8K math prompts
-SFT_DATA=/home/sdp/data/gsm8k_sft/train.parquet     # SFT: 128 chat-format GSM8K samples
-PREF_DATA=OpenRLHF/preference_dataset_mixture2_and_safe_pku  # RM/DPO: preference pairs
-VLM_DATA=hiyouga/geometry3k                          # VLM: 32 visual geometry problems
+# Datasets. RL prompts + SFT parquet are generated under tests/data by
+# prepare_e2e_data.py (auto-run below if missing). RM/DPO + VLM are HF hub ids.
+PROMPTS=${PROMPTS:-$REPO/tests/data/gsm8k_train_prompts.jsonl}   # RL: GSM8K math prompts
+SFT_DATA=${SFT_DATA:-$REPO/tests/data/gsm8k_sft/train.parquet}  # SFT: GSM8K chat-format
+PREF_DATA=OpenRLHF/preference_dataset_mixture2_and_safe_pku     # RM/DPO: preference pairs
+VLM_DATA=hiyouga/geometry3k                                     # VLM: visual geometry problems
 
-# XPU device environment (Arc Pro B70, Ray misdetects as NVIDIA without this)
-export PATH="/opt/intel/oneapi/compiler/2025.3/bin:$VENV/bin:$PATH"
-export ONEAPI_DEVICE_SELECTOR=level_zero:0,1
+# Generate the local RL/SFT datasets if they are not present yet.
+if [[ ! -f "$PROMPTS" || ! -f "$SFT_DATA" ]]; then
+    "$PYTHON" "$REPO/tests/prepare_e2e_data.py" || { echo "data prep failed"; exit 1; }
+fi
+
+# XPU device environment (Arc Pro B70, Ray misdetects as NVIDIA without this).
+# Prepend the oneAPI compiler dir only if present on this box.
+ONEAPI_BIN=/opt/intel/oneapi/compiler/2025.3/bin
+[[ -d "$ONEAPI_BIN" ]] && export PATH="$ONEAPI_BIN:$PATH"
+export ONEAPI_DEVICE_SELECTOR=${ONEAPI_DEVICE_SELECTOR:-level_zero:0,1}
 export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1
 
 # Weight-freshness probe: set to 1 to log actor/vLLM checksums at each sync step
@@ -89,17 +102,17 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 # Called before every test to guarantee a clean GPU state.
 ray_start() {
     local n=${1:-2}
-    "$VENV/bin/ray" stop --force >/dev/null 2>&1 || true
+    "$RAY" stop --force >/dev/null 2>&1 || true
     pkill -9 -f "train_ppo_ray|train_sft|train_dpo|train_rm|EngineCore|PolicyModelActor|RolloutRayActor|ray::" \
         >/dev/null 2>&1 || true
     rm -rf /tmp/ray
     sleep 4
-    "$VENV/bin/ray" start --head --num-gpus="$n" 2>&1 | tail -3
+    "$RAY" start --head --num-gpus="$n" 2>&1 | tail -3
     sleep 3
 }
 
 ray_stop() {
-    "$VENV/bin/ray" stop --force >/dev/null 2>&1 || true
+    "$RAY" stop --force >/dev/null 2>&1 || true
     pkill -9 -f "train_ppo_ray|train_sft|train_dpo|train_rm|EngineCore|PolicyModelActor|RolloutRayActor|ray::" \
         >/dev/null 2>&1 || true
     rm -rf /tmp/ray
@@ -128,7 +141,7 @@ run_ppo_test() {
     log "START $id — $desc"
 
     ray_start 2
-    "$VENV/bin/python" -m openrlhf.cli.train_ppo_ray \
+    "$PYTHON" -m openrlhf.cli.train_ppo_ray \
         --actor.num_nodes 1 --actor.num_gpus_per_node 1 \
         --vllm.num_engines 1 --vllm.tensor_parallel_size 1 \
         --vllm.gpu_memory_utilization 0.8 --vllm.enforce_eager \
@@ -177,7 +190,7 @@ run_supervised_test() {
     local logf=$RESULTS/$id.log
     log "START $id — $desc"
 
-    PYTHONUNBUFFERED=1 "$VENV/bin/python" -m openrlhf.cli."$trainer" \
+    PYTHONUNBUFFERED=1 "$PYTHON" -m openrlhf.cli."$trainer" \
         --ds.zero_stage 2 --ds.adam_offload \
         --ds.attn_implementation sdpa \
         --ds.param_dtype bf16 \
@@ -410,7 +423,7 @@ run_ppo_test "grpo_ema" \
     log "START vlm_grpo — VLM GRPO — Qwen2-VL-2B, image+text, frozen vision encoder"
     logf=$RESULTS/vlm_grpo.log
     ray_start 2
-    "$VENV/bin/python" -m openrlhf.cli.train_ppo_ray \
+    "$PYTHON" -m openrlhf.cli.train_ppo_ray \
         --actor.num_nodes 1 --actor.num_gpus_per_node 1 \
         --vllm.num_engines 1 --vllm.tensor_parallel_size 1 \
         --vllm.gpu_memory_utilization 0.7 --vllm.enforce_eager \

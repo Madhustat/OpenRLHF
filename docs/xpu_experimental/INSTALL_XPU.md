@@ -204,15 +204,17 @@ The XCCL-only env vars (`CCL_ZE_IPC_EXCHANGE`, `FI_PROVIDER=shm`, etc.) are
 
 | Used as | Path in suite | How provided |
 |---|---|---|
-| RL prompts | `$REPO/gsm8k_train_prompts.jsonl` | **ships in the repo** (80 GSM8K prompts) — present after clone |
-| SFT data | `/home/sdp/data/gsm8k_sft/train.parquet` | **box-local**, NOT in repo — 128 chat-format GSM8K samples; must be provided |
+| RL prompts | `tests/data/gsm8k_train_prompts.jsonl` | **auto-generated** by `tests/prepare_e2e_data.py` from GSM8K on first run |
+| SFT data | `tests/data/gsm8k_sft/train.parquet` | **auto-generated** by the same script from GSM8K on first run |
 | RM/DPO data | `OpenRLHF/preference_dataset_mixture2_and_safe_pku` | HF hub, auto-downloaded |
 | VLM data | `hiyouga/geometry3k` | HF hub, auto-downloaded |
 | RL/SFT/RM/DPO model | `Qwen/Qwen2.5-0.5B` | HF hub, auto-downloaded |
 | VLM model | `/tmp/hf_vlm_clean/Qwen2-VL-2B-Instruct` | **local snapshot** — download via `huggingface_hub.snapshot_download` (command is in the suite comments) |
 
-Two paths are box-local and not portable: `gsm8k_sft/train.parquet` and the
-VLM snapshot. Everything else is either committed to the repo or HF-hub auto-download.
+The RL prompts and SFT parquet are generated automatically on first run (the
+suite calls `tests/prepare_e2e_data.py` if they are missing); pass `--force` to
+regenerate. Only the VLM snapshot must be downloaded manually. Everything else
+is HF-hub auto-download.
 
 ---
 

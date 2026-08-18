@@ -49,72 +49,51 @@
 set -uo pipefail
 
 # ──────────────────────────────────────────────────────────────────────────────
-# LOCAL ADAPTATIONS for this single-XPU box (dut7054) — 2026-08
+# NOTES — non-obvious single-GPU config requirements (not code defects)
 # ──────────────────────────────────────────────────────────────────────────────
-# This suite was authored on a different box (user sdp). The changes below adapt
-# it to this machine. Result after adaptation: 18/18 PASS. None of the original
-# failures were code defects — all were environment/config/architecture:
+#   - sg_grpo_kl passes `--ref.num_nodes 1 --ref.num_gpus_per_node 1` so the
+#     colocated reference model matches the actor's single GPU (otherwise the
+#     ref model defaults to 8 GPUs and trips a colocate assertion).
+#   - sample packing (sg_sft_packing) needs `kernels` pinned to 0.15.2 <= v <
+#     0.16.0; if it fails on this box: pip install "kernels==0.15.2".
+#   - Async GRPO is NOT here — it requires >=2 GPUs (validated as grpo_async in
+#     test_e2e_suite_multigpu.sh).
 #
-#   1. REPO / VENV repointed to this box's checkout + venv-tf (paths below).
-#   2. PYTHONPATH prepends REPO — the venv's editable openrlhf points at a
-#      different checkout, so this forces imports to resolve to THIS repo.
-#   3. SFT_DATA repointed to /tmp/gsm8k_sft/train.parquet (the sdp path does not
-#      exist here). See PREREQUISITES below to (re)generate it.
-#   4. sg_grpo_kl: added `--ref.num_nodes 1 --ref.num_gpus_per_node 1` so the
-#      colocated reference model matches the actor's single GPU (otherwise the
-#      ref model defaults to 8 GPUs and trips a colocate assertion). CONFIG, not code.
-#   5. sample-packing (sg_sft_packing) needs the `kernels` pip package pinned to
-#      0.15.2 <= v < 0.16.0. This box had 0.16.0; downgrade once:
-#          pip install "kernels==0.15.2"
-#      DEPENDENCY VERSION, not code.
-#   6. Async GRPO REMOVED from this suite — it requires >=2 GPUs (async overlaps
-#      vLLM generation with actor training on separate devices; async+sleep is
-#      disallowed and async+colocate-no-sleep deadlocks on one device). It is
-#      validated as `grpo_async` in test_e2e_suite_multigpu.sh. ARCHITECTURE, not code.
-#
-# PREREQUISITES (run once before the suite; both use the venv above):
-#   # RL prompts -> $PROMPTS
-#   python - <<'PY'
-#   from datasets import load_dataset; import json
-#   ds = load_dataset("openai/gsm8k","main",split="train").select(range(400))
-#   sfx=" Please reason step by step, and put your final answer within \\boxed{}."
-#   with open("gsm8k_train_prompts.jsonl","w") as f:
-#       for r in ds: f.write(json.dumps({"prompt":r["question"]+sfx,
-#           "label":r["answer"].split("####")[-1].strip().replace(",","")})+"\n")
-#   PY
-#   # SFT parquet ('messages' chat format) -> $SFT_DATA
-#   mkdir -p /tmp/gsm8k_sft
-#   python - <<'PY'
-#   from datasets import load_dataset; import pandas as pd
-#   ds = load_dataset("openai/gsm8k","main",split="train").select(range(256))
-#   rows=[{"messages":[{"role":"user","content":r["question"]},
-#          {"role":"assistant","content":r["answer"]}]} for r in ds]
-#   pd.DataFrame(rows).to_parquet("/tmp/gsm8k_sft/train.parquet")
-#   PY
-#   pip install "kernels==0.15.2"   # required for sg_sft_packing
-#
-# (RM/DPO download PREF_DATA from HuggingFace on first run — needs network.)
+# RL prompts and the SFT parquet are generated automatically by
+# tests/prepare_e2e_data.py on first run. RM/DPO data downloads from HuggingFace
+# on first run (needs network).
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-REPO=/home/dut7054/madhu/OpenRLHF_exp_multi
-VENV=/home/dut7054/madhu/work2_with_transformers_native/OpenRLHF/venv-tf
-MODEL=Qwen/Qwen2.5-0.5B
+# Repo root is derived from this script's location so the suite runs from any
+# clone. Interpreter/launcher and paths are overridable via env for other boxes.
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PYTHON=${PYTHON:-python}
+RAY=${RAY:-ray}
+MODEL=${MODEL:-Qwen/Qwen2.5-0.5B}
 REWARD_FN=$REPO/examples/python/math_reward_func.py
-PROMPTS=$REPO/gsm8k_train_prompts.jsonl
-SFT_DATA=/tmp/gsm8k_sft/train.parquet
+
+# RL prompts + SFT parquet are generated under tests/data by prepare_e2e_data.py.
+PROMPTS=${PROMPTS:-$REPO/tests/data/gsm8k_train_prompts.jsonl}
+SFT_DATA=${SFT_DATA:-$REPO/tests/data/gsm8k_sft/train.parquet}
 PREF_DATA=OpenRLHF/preference_dataset_mixture2_and_safe_pku
 
-# Force the interpreter to use THIS checkout's openrlhf (the venv's editable
-# install points at a different checkout; prepend REPO so imports resolve here).
+# Generate the local RL/SFT datasets if they are not present yet.
+if [[ ! -f "$PROMPTS" || ! -f "$SFT_DATA" ]]; then
+    "$PYTHON" "$REPO/tests/prepare_e2e_data.py" || { echo "data prep failed"; exit 1; }
+fi
+
+# Prefer this checkout's openrlhf over any other install on PYTHONPATH.
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
-# XPU device environment — use only the first device for single-GPU runs
-export PATH="/opt/intel/oneapi/compiler/2025.3/bin:$VENV/bin:$PATH"
-export ONEAPI_DEVICE_SELECTOR=level_zero:0     # pin to device 0 only
+# XPU device environment — use only the first device for single-GPU runs.
+# Prepend the oneAPI compiler dir only if present on this box.
+ONEAPI_BIN=/opt/intel/oneapi/compiler/2025.3/bin
+[[ -d "$ONEAPI_BIN" ]] && export PATH="$ONEAPI_BIN:$PATH"
+export ONEAPI_DEVICE_SELECTOR=${ONEAPI_DEVICE_SELECTOR:-level_zero:0}   # pin to device 0 only
 export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1
 export HF_DATASETS_CACHE=/tmp/hf_datasets_cache_suite
 
@@ -133,18 +112,18 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 # Stop Ray and kill any leftover processes before every test.
 ray_start() {
-    "$VENV/bin/ray" stop --force >/dev/null 2>&1 || true
+    "$RAY" stop --force >/dev/null 2>&1 || true
     pkill -9 -f "train_ppo_ray|train_sft|train_dpo|train_rm|EngineCore|PolicyModelActor|RolloutRayActor|ray::" \
         >/dev/null 2>&1 || true
     rm -rf /tmp/ray
     sleep 4
     # Single GPU: start Ray with 1 GPU
-    "$VENV/bin/ray" start --head --num-gpus=1 2>&1 | tail -3
+    "$RAY" start --head --num-gpus=1 2>&1 | tail -3
     sleep 3
 }
 
 ray_stop() {
-    "$VENV/bin/ray" stop --force >/dev/null 2>&1 || true
+    "$RAY" stop --force >/dev/null 2>&1 || true
     pkill -9 -f "train_ppo_ray|train_sft|train_dpo|train_rm|EngineCore|PolicyModelActor|RolloutRayActor|ray::" \
         >/dev/null 2>&1 || true
     rm -rf /tmp/ray
@@ -178,7 +157,7 @@ run_rl_singlegpu_test() {
     log "START $id — $desc"
 
     ray_start
-    "$VENV/bin/python" -m openrlhf.cli.train_ppo_ray \
+    "$PYTHON" -m openrlhf.cli.train_ppo_ray \
         --actor.num_nodes 1 --actor.num_gpus_per_node 1 \
         --vllm.num_engines 1 --vllm.tensor_parallel_size 1 \
         --vllm.gpu_memory_utilization 0.4 --vllm.enforce_eager \
@@ -226,7 +205,7 @@ run_supervised_test() {
     local logf=$RESULTS/$id.log
     log "START $id — $desc"
 
-    PYTHONUNBUFFERED=1 "$VENV/bin/python" -m openrlhf.cli."$trainer" \
+    PYTHONUNBUFFERED=1 "$PYTHON" -m openrlhf.cli."$trainer" \
         --ds.zero_stage 2 --ds.adam_offload \
         --ds.attn_implementation sdpa \
         --ds.param_dtype bf16 \

@@ -157,3 +157,6 @@ wandb
 docs/logs_of_end_end_tests/**/*.log
 # E2E suite run outputs (logs + per-test results)
 tests/results/
+
+# E2E suite generated datasets (prepare_e2e_data.py)
+tests/data/
