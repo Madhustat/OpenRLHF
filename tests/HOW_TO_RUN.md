@@ -22,8 +22,12 @@ See `TESTS.md` for a full description of every test.
 ### Hardware
 - This guide targets **2× Intel Arc Pro B70** (XPU).
 - The single-GPU suite also runs on 1× B70.
-- For NVIDIA, the same commands work — remove the XPU-specific env vars
-  (Steps 1 and 2 below) and replace `--vllm.sync_backend gloo` with `nccl`.
+- **NVIDIA is supported directly** — the multi-GPU suite auto-detects the
+  accelerator from torch and switches to `nccl` + `CUDA_VISIBLE_DEVICES` (Intel
+  XPU uses `gloo` + `ONEAPI_DEVICE_SELECTOR`). Just run it; no edits needed.
+  Force a device with `DEVICE=cuda` or `DEVICE=xpu`, or the backend with
+  `SYNC_BACKEND=nccl|gloo`. On NVIDIA the suite also sets `DS_SKIP_CUDA_CHECK=1`
+  automatically for the `adam_offload` JIT.
 
 ### Software
 | Component | Version used |

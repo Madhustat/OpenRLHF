@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-# OpenRLHF XPU E2E Test Suite — Multi-GPU (2x Arc Pro B70)
+# OpenRLHF E2E Test Suite — Multi-GPU (Intel XPU or NVIDIA CUDA)
 # =============================================================================
 #
-# Validates every major OpenRLHF training path on 2x Intel Arc Pro B70 (XPU).
+# Validates every major OpenRLHF training path on 2 GPUs. The accelerator is
+# auto-detected from torch: NVIDIA uses nccl + CUDA_VISIBLE_DEVICES, Intel XPU
+# uses gloo + ONEAPI_DEVICE_SELECTOR. Override with DEVICE=cuda|xpu.
 # Covers 29 configurations across 9 groups:
 #
 #   Group 1  — GRPO variants       (ZeRO-2/3, colocation, LoRA, KL, ref model)
@@ -16,7 +18,7 @@
 #   Group 8  — Reward Model        (full fine-tune, LoRA)
 #   Group 9  — DPO / IPO / cDPO
 #
-# Hardware: 2x Arc Pro B70 (XPU), torch 2.12.0+xpu, vLLM 0.23.1rc1, Ray 2.55
+# Validated on: 2x Arc Pro B70 (XPU, torch 2.12.0+xpu) and 2x NVIDIA (CUDA)
 # Model:    Qwen/Qwen2.5-0.5B (RL/SFT/RM/DPO), Qwen2-VL-2B-Instruct (VLM)
 # Dataset:  GSM8K prompts (RL), GSM8K SFT (supervised),
 #           OpenRLHF preference mixture (RM/DPO), geometry3k (VLM)
@@ -72,12 +74,22 @@ if [[ ! -f "$PROMPTS" || ! -f "$SFT_DATA" ]]; then
     "$PYTHON" "$REPO/tests/prepare_e2e_data.py" || { echo "data prep failed"; exit 1; }
 fi
 
-# XPU device environment (Arc Pro B70, Ray misdetects as NVIDIA without this).
-# Prepend the oneAPI compiler dir only if present on this box.
-ONEAPI_BIN=/opt/intel/oneapi/compiler/2025.3/bin
-[[ -d "$ONEAPI_BIN" ]] && export PATH="$ONEAPI_BIN:$PATH"
-export ONEAPI_DEVICE_SELECTOR=${ONEAPI_DEVICE_SELECTOR:-level_zero:0,1}
-export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1
+# Accelerator: auto-detected from torch (cuda -> NVIDIA, else XPU); override
+# with DEVICE=cuda|xpu. Selects the weight-sync backend (nccl vs gloo) and the
+# device-visibility env var accordingly.
+DEVICE=${DEVICE:-$("$PYTHON" -c "import torch;print('cuda' if torch.version.cuda else 'xpu')")}
+if [[ "$DEVICE" == "cuda" ]]; then
+    SYNC_BACKEND=${SYNC_BACKEND:-nccl}
+    export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+    export DS_SKIP_CUDA_CHECK=1   # tolerate container CUDA-toolkit vs torch mismatch on adam_offload JIT
+else
+    SYNC_BACKEND=${SYNC_BACKEND:-gloo}
+    # Prepend the oneAPI compiler dir only if present on this box.
+    ONEAPI_BIN=/opt/intel/oneapi/compiler/2025.3/bin
+    [[ -d "$ONEAPI_BIN" ]] && export PATH="$ONEAPI_BIN:$PATH"
+    export ONEAPI_DEVICE_SELECTOR=${ONEAPI_DEVICE_SELECTOR:-level_zero:0,1}
+    export RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1  # Ray misdetects Arc Pro B70 as NVIDIA
+fi
 
 # Weight-freshness probe: set to 1 to log actor/vLLM checksums at each sync step
 export OPENRLHF_WEIGHT_PROBE=0
@@ -145,7 +157,7 @@ run_ppo_test() {
         --actor.num_nodes 1 --actor.num_gpus_per_node 1 \
         --vllm.num_engines 1 --vllm.tensor_parallel_size 1 \
         --vllm.gpu_memory_utilization 0.8 --vllm.enforce_eager \
-        --vllm.sync_backend gloo \
+        --vllm.sync_backend "$SYNC_BACKEND" \
         --actor.model_name_or_path "$MODEL" \
         --reward.remote_url "$REWARD_FN" \
         --data.prompt_dataset "$PROMPTS" \
@@ -218,7 +230,7 @@ run_supervised_test() {
 
 log "══════════════════════════════════════════════"
 log "OpenRLHF XPU E2E Test Suite  $TS"
-log "Hardware: 2x Arc Pro B70 | Model: $MODEL"
+log "Device: $DEVICE | Sync backend: $SYNC_BACKEND | Model: $MODEL"
 log "Results:  $RESULTS"
 log "══════════════════════════════════════════════"
 
@@ -427,7 +439,7 @@ run_ppo_test "grpo_ema" \
         --actor.num_nodes 1 --actor.num_gpus_per_node 1 \
         --vllm.num_engines 1 --vllm.tensor_parallel_size 1 \
         --vllm.gpu_memory_utilization 0.7 --vllm.enforce_eager \
-        --vllm.sync_backend gloo \
+        --vllm.sync_backend "$SYNC_BACKEND" \
         --actor.model_name_or_path "$VLM_MODEL" \
         --reward.remote_url "$REWARD_FN" \
         --data.prompt_dataset "$VLM_DATA" \
