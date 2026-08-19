@@ -56,6 +56,19 @@ exit, forcing a full reinstall next time. A named container can be stopped and r
 with everything still installed intact (see the companion file
 `DOCKER_start_or_resume_nvidia.md` for the exact resume commands).
 
+For a shared machine or the 2-GPU E2E suite, expose only two known-free GPUs instead of every
+GPU on the host. Check ownership first with `nvidia-smi`, then replace `--runtime=nvidia` with
+an explicit GPU request such as this (example selects host GPUs 0 and 1):
+```bash
+docker run --gpus '"device=0,1"' -it --name openrlhf-nvidia-e2e --ipc=host --shm-size=16g \
+  -e http_proxy="$http_proxy" -e https_proxy="$https_proxy" \
+  -e HTTP_PROXY="$HTTP_PROXY" -e HTTPS_PROXY="$HTTPS_PROXY" \
+  -v $PWD:/openrlhf nvcr.io/nvidia/pytorch:26.03-py3 bash
+```
+The container sees its selected devices as CUDA devices 0 and 1, so use
+`CUDA_VISIBLE_DEVICES=0,1` inside the container. Do not select a host GPU already used by
+another workload.
+
 This drops you into a shell **inside the container**, as `root` (e.g. `root@<container-id>:/workspace#`)
 — NVIDIA's PyTorch container images run as `root` by default. This is expected and unrelated
 to your host machine's user account; you are now in an isolated environment, separate from the
@@ -131,6 +144,17 @@ Activate the environment for the rest of this guide:
 source venv-tf/bin/activate
 ```
 
+For the direct DeepSpeed commands used by the SFT, reward-model, and DPO E2E tests, also install
+the MPI Python binding. Without it, those tests stop before training with
+`ModuleNotFoundError: No module named 'mpi4py'`:
+```bash
+pip install mpi4py
+python -c "from mpi4py import MPI; print('mpi4py OK; MPI', MPI.Get_version())"
+```
+If pip must compile the binding, point it at the MPI compiler supplied by the container, for
+example `MPICC=/usr/local/mpi/bin/mpicc pip install mpi4py`. This requirement is for the
+supervised DeepSpeed launch path, not a CUDA/NCCL failure.
+
 ---
 
 ## Part 3 — Verify torch sees the GPU correctly
@@ -149,6 +173,11 @@ Expected: a `+cuXXX`-suffixed torch version (e.g. `2.x.x+cu121`), `True`, `cuda`
 nvidia-smi
 ```
 Confirms the GPU(s) are visible and healthy at the driver level.
+
+For the multi-GPU suite, verify the container sees at least two selected devices before starting:
+```bash
+python -c "import torch; print('cuda:', torch.version.cuda, 'device_count:', torch.cuda.device_count()); assert torch.cuda.is_available() and torch.cuda.device_count() >= 2"
+```
 
 ---
 
@@ -229,6 +258,77 @@ no meaning on NVIDIA/NCCL. Upstream `test_ray_env_vars.py`, unmodified, is suffi
 
 ---
 
+## Part 7 — CUDA multi-GPU E2E suite
+
+The branch's `tests/test_e2e_suite_multigpu.sh` auto-detects CUDA, sets
+`CUDA_VISIBLE_DEVICES=0,1` when it is not already set, chooses the `nccl` weight-sync backend,
+and exports `DS_SKIP_CUDA_CHECK=1` for the DeepSpeed `adam_offload` JIT. No XPU variables should
+be set for this path.
+
+From the repository root, use the two devices exposed to the container:
+```bash
+export PYTHONPATH="$PWD:$PYTHONPATH"
+export CUDA_VISIBLE_DEVICES=0,1
+
+python -c "
+import torch, ray, deepspeed, transformers, vllm
+from mpi4py import MPI
+print('torch', torch.__version__, 'cuda', torch.version.cuda, 'devices', torch.cuda.device_count())
+print('ray', ray.__version__, 'deepspeed', deepspeed.__version__)
+print('transformers', transformers.__version__, 'vllm', vllm.__version__)
+print('MPI', MPI.Get_version())
+"
+```
+
+The multi-GPU suite has one VLM test. Download its required local model before the full run;
+otherwise `vlm_grpo` fails before training because the configured local path is absent:
+```bash
+python -c "
+from huggingface_hub import snapshot_download
+snapshot_download(
+  'Qwen/Qwen2-VL-2B-Instruct',
+  local_dir='/tmp/hf_vlm_clean/Qwen2-VL-2B-Instruct',
+)
+"
+```
+This snapshot is about 4.2 GB in the validated CUDA environment. Ensure the container filesystem
+has sufficient free space for it, the Hugging Face cache, Ray temporary files, and checkpoints.
+
+Smoke-test the two baseline configurations first:
+```bash
+bash tests/test_e2e_suite_multigpu.sh grpo_zero
+```
+The banner must include:
+```text
+Device: cuda | Sync backend: nccl
+```
+Both `grpo_zero2_nocolo` and `grpo_zero3_nocolo` should reach 10 steps. Then start the full run:
+```bash
+nohup bash tests/test_e2e_suite_multigpu.sh > tests/multigpu_run.log 2>&1 &
+echo "PID=$!"
+```
+
+Monitor it and inspect the latest summary with:
+```bash
+tail -f tests/multigpu_run.log
+RDIR=$(ls -td tests/results/e2e_suite_* | head -1)
+cat "$RDIR/summary.txt"
+```
+
+### CUDA E2E troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| SFT/RM/DPO tests all exit before a `loss=` line with `ModuleNotFoundError: No module named 'mpi4py'` | The direct DeepSpeed supervised path needs the MPI Python binding. | Install and import-check `mpi4py` as in Part 2. |
+| `vlm_grpo` raises `Repo id must be in the form ... /tmp/hf_vlm_clean/Qwen2-VL-2B-Instruct` | The configured local VLM directory does not exist. | Run the `snapshot_download` command above, then rerun `bash tests/test_e2e_suite_multigpu.sh vlm_grpo`. |
+| `DeepSpeed Op Builder: Installed CUDA version ... does not match` | CUDA toolkit and PyTorch build versions differ. | `export DS_SKIP_CUDA_CHECK=1`; the suite exports it automatically on CUDA. |
+| Ray reports `/tmp/ray/... is over 95% full` | Ray temporary data has consumed the container filesystem. | Stop Ray, remove stale `/tmp/ray` and `/tmp/e2e_*` directories, then confirm free disk space before retrying. |
+
+The optional Triton-kernel import warning from vLLM is not by itself a test failure if the test
+continues to produce `Global step` lines and the suite records `PASS`.
+
+---
+
 ## Summary checklist
 
 - [ ] (Part 0) Create `openrlhf_exp/` as the base folder
@@ -239,3 +339,7 @@ no meaning on NVIDIA/NCCL. Upstream `test_ray_env_vars.py`, unmodified, is suffi
 - [ ] (Part 5) No manual Ray GPU configuration needed (unlike XPU) — confirm
       `ray.cluster_resources()` shows a `GPU` key automatically
 - [ ] (Part 6) `pip install pytest`, copy over the 2 generic test files, run `pytest tests/`
+- [ ] (Part 7) For multi-GPU E2E: expose two free GPUs, install `mpi4py`, verify two CUDA
+  devices, and pre-download `Qwen/Qwen2-VL-2B-Instruct`
+- [ ] (Part 7) Confirm the smoke banner says `Device: cuda | Sync backend: nccl` before the
+  full E2E suite

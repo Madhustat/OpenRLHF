@@ -582,6 +582,32 @@ run_supervised_test "dpo_cdpo" \
     --ckpt.output_dir /tmp/e2e_dpo_cdpo --ckpt.save_steps -1 \
     --eval.steps -1
 
+# ── (HW limit) ppo_gae — requires 3 GPUs, NOT part of this 2-GPU suite ───────
+# PPO with a separate critic (actor + critic + vLLM = 3 roles). Left commented
+# out here since this suite runs on 2 GPUs; validated manually on a 3-GPU
+# NVIDIA box (Qwen2.5-0.5B, no colocation) — 10/10 steps passed, exit code 0.
+# Uncomment and run only on a box with >= 3 free GPUs, e.g.:
+# CUDA_VISIBLE_DEVICES=4,5,6 ray_start 3
+# "$PYTHON" -m openrlhf.cli.train_ppo_ray \
+#     --actor.num_nodes 1 --actor.num_gpus_per_node 1 \
+#     --critic.num_nodes 1 --critic.num_gpus_per_node 1 \
+#     --vllm.num_engines 1 --vllm.tensor_parallel_size 1 \
+#     --vllm.gpu_memory_utilization 0.8 --vllm.enforce_eager \
+#     --vllm.sync_backend "$SYNC_BACKEND" \
+#     --algo.advantage.estimator gae --algo.kl.init_coef 0 \
+#     --rollout.n_samples_per_prompt 4 --rollout.batch_size 8 \
+#     --actor.model_name_or_path "$MODEL" \
+#     --critic.model_name_or_path "$MODEL" \
+#     --reward.remote_url "$REWARD_FN" \
+#     --data.prompt_dataset "$PROMPTS" \
+#     --data.input_key prompt --data.label_key label --data.apply_chat_template \
+#     --data.max_len 512 --data.max_samples 80 \
+#     --train.batch_size 8 --train.micro_batch_size 4 \
+#     --train.max_epochs 1 \
+#     --ds.attn_implementation sdpa \
+#     --ckpt.output_dir /tmp/e2e_ppo_gae --ckpt.save_steps -1 \
+#     --logger.logging_steps 1 --eval.steps -1
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────────────────────────────────────
