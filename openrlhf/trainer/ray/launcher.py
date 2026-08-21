@@ -33,7 +33,19 @@ class BaseDistributedActor:
         # environment variable for each actor, unless
         # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set, so
         # set local rank to 0 when the flag is not applicable.
-        os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
+        if ray_noset_visible_devices():
+            gpu_id = ray.get_gpu_ids()[0]
+            # On Intel XPU, Ray's CUDA_VISIBLE_DEVICES is a no-op (Level-Zero reads
+            # ZE_AFFINITY_MASK). Pin the mask here - before any torch.xpu call - so the actor
+            # sees only its assigned device; LOCAL_RANK is then 0 within that single-device mask.
+            if torch.version.cuda is None and torch.version.hip is None:
+                os.environ["ZE_AFFINITY_MASK"] = str(gpu_id)
+                os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
+                os.environ["LOCAL_RANK"] = "0"
+            else:
+                os.environ["LOCAL_RANK"] = str(gpu_id)
+        else:
+            os.environ["LOCAL_RANK"] = "0"
 
     @staticmethod
     def _get_current_node_ip():

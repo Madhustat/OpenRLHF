@@ -21,7 +21,11 @@ from openrlhf.utils.deepspeed.deepspeed_utils import (
     offload_deepspeed_states,
     reload_deepspeed_states,
 )
-from openrlhf.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
+from openrlhf.utils.distributed_util import (
+    resolve_vllm_sync_backend,
+    stateless_init_process_group,
+    torch_dist_barrier_and_cuda_sync,
+)
 from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.loss_utils import get_loss_batch_info, iter_grad_accum_global_norm
 from openrlhf.utils.vlm_utils import merge_mm_train_inputs
@@ -98,12 +102,17 @@ class ActorPPOTrainer(ABC):
             self.args.train.dynamic_batch_enable,
         )
 
-        # Init torch group for weights sync
-        backend = getattr(self.strategy.args.vllm, "sync_backend", "nccl")
-        self.use_cuda_ipc = backend == "nccl" and self.args.train.colocate_all and not self.args.train.async_enable
+        # Init torch group for weights sync. Resolve the backend once (auto-detect when unset,
+        # strict on explicit) so downstream decisions - especially CUDA IPC - use the effective
+        # backend, not the raw config value.
+        configured_backend = getattr(self.strategy.args.vllm, "sync_backend", None)
+        self.vllm_sync_backend = resolve_vllm_sync_backend(configured_backend)
+        self.use_cuda_ipc = (
+            self.vllm_sync_backend == "nccl" and self.args.train.colocate_all and not self.args.train.async_enable
+        )
 
         if self.vllm_engines is not None and not self.use_cuda_ipc and torch.distributed.get_rank() == 0:
-            self._init_vllm_sync_group(backend)
+            self._init_vllm_sync_group(self.vllm_sync_backend)
 
         torch_dist_barrier_and_cuda_sync()
 
@@ -146,8 +155,9 @@ class ActorPPOTrainer(ABC):
             collective.init_collective_group(world_size=world_size, rank=0, backend=backend, group_name=group_name)
             self._model_update_group = group_name
         else:
+            device = torch.device(torch.accelerator.current_accelerator().type, torch.accelerator.current_device_index())
             self._model_update_group = stateless_init_process_group(
-                master_address, master_port, 0, world_size, torch.cuda.current_device()
+                master_address, master_port, 0, world_size, device, backend=backend
             )
 
         ray.get(refs)
@@ -170,7 +180,7 @@ class ActorPPOTrainer(ABC):
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_device_index()
 
         status_list = []
         status_mean = {}
@@ -413,7 +423,7 @@ class ActorPPOTrainer(ABC):
             for engine in self.vllm_engines:
                 cache_reset_refs.append(engine.reset_prefix_cache.remote())
 
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         model = self.actor.model.module
         count = 0
 
@@ -432,7 +442,10 @@ class ActorPPOTrainer(ABC):
 
                     collective.broadcast(param.data, 0, group_name=self._model_update_group)
                 else:
-                    self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                    # Preserve the explicit CUDA stream on the NCCL path; XCCL uses the current
+                    # XPU stream and accepts stream=None. Both broadcast into param.data in place.
+                    stream = torch.cuda.current_stream() if self.vllm_sync_backend == "nccl" else None
+                    self._model_update_group.broadcast(param.data, src=0, stream=stream)
                 ray.get(refs)
 
         def _handle_cuda_ipc(param, count, num_params):
@@ -485,7 +498,7 @@ class ActorPPOTrainer(ABC):
 
         if cache_reset_refs:
             ray.get(cache_reset_refs)
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         torch_dist_barrier_and_cuda_sync()
 
 
@@ -498,9 +511,10 @@ class PolicyModelActor(BaseModelActor):
         self.vllm_engines = vllm_engines
         self.max_steps = max_steps
 
-        # Skip for vLLM >= 0.16 where NCCL_CUMEM_ENABLE=0 causes ncclCommInitRank to fail
-        # with "unhandled cuda error" under NCCL 2.27+.
-        if getattr(args.vllm, "sync_backend", "nccl") == "nccl":
+        # NCCL-only workaround: for vLLM < 0.16, NCCL_CUMEM_ENABLE=0 avoids ncclCommInitRank
+        # failing with "unhandled cuda error" under NCCL 2.27+. Gate on the resolved backend so
+        # it never fires on the XCCL/XPU path.
+        if resolve_vllm_sync_backend(getattr(args.vllm, "sync_backend", None)) == "nccl":
             import vllm
             from packaging import version as pkg_version
 
@@ -596,12 +610,12 @@ class PolicyModelActor(BaseModelActor):
 
     def fit(self, kl_ctl: float = 0):
         """Train actor model with the replay buffer."""
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         self.actor.train()
         status = self.trainer.ppo_train(kl_ctl)
         self.trainer.replay_buffer.clear()
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        torch.accelerator.empty_cache()
+        torch.accelerator.synchronize()
         return status
 
     def save_model(self):
@@ -623,7 +637,7 @@ class PolicyModelActor(BaseModelActor):
         mm_train_inputs_list=None,
     ) -> torch.Tensor:
         """Generates actor values."""
-        device = torch.cuda.current_device()
+        device = torch.accelerator.current_device_index()
 
         # VLM: merge pre-processed multimodal inputs from all samples in batch
         mm_inputs = {}
