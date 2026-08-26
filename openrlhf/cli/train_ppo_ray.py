@@ -237,7 +237,17 @@ if __name__ == "__main__":
         default=1,
         help="tensor parallel size of vLLM Engine for multi-GPU inference",
     )
-    parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="DeepSpeed -> vLLM weight sync backend")
+    parser.add_argument(
+        "--vllm.sync_backend",
+        choices=("nccl", "gloo"),
+        default=None,
+        help=(
+            "DeepSpeed -> vLLM weight-sync backend. "
+            "Omitted/None: auto-detect (nccl on CUDA/ROCm, gloo on Intel XPU and other platforms). "
+            "'nccl': CUDA/ROCm native GPU-to-GPU. "
+            "'gloo': CPU-staged broadcast, works on any accelerator including Intel XPU."
+        ),
+    )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
     parser.add_argument("--vllm.enable_prefix_caching", action="store_true", default=False)
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")
