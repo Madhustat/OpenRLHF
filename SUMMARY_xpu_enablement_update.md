@@ -16,8 +16,7 @@ loop validated end-to-end on Intel XPU — single *and* multi-XPU — across eve
 plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
 as **4 more PRs**.
 
-
-## Headline or summary
+## Headline
 
 - **Full RLHF loop runs end-to-end on Intel XPU** — validated on both a **single XPU** and
   **multiple XPUs**, spanning the complete Ray + vLLM + DeepSpeed stack.
@@ -40,12 +39,11 @@ moving upstream.
 | PR | Delivers | Status |
 |---|---|---|
 | **Device-agnostic APIs** | Migrates the framework from CUDA-specific calls to PyTorch's device-agnostic accelerator APIs — the bulk of the enablement. | **Submitted** |
-| Optional flash-attn imports | flash_attn is a CUDA-only package that OpenRLHF imported unconditionally, so the model stack wouldn't even import on XPU. Now falls back to equivalent PyTorch implementations when it's absent; the NVIDIA path is unchanged. | Submitted |
+| **Optional flash-attn imports** | `flash_attn` is a CUDA-only package that OpenRLHF imported unconditionally, so the model stack wouldn't even import on XPU. Now falls back to equivalent PyTorch implementations when it's absent; the NVIDIA path is unchanged. | **Submitted** |
 | **vLLM device pinning** | Pins each vLLM rollout worker to its assigned Intel device (XPU uses a different visibility variable than NVIDIA), so workers don't collide on device 0. | **Ready to submit** |
 | **vLLM weight sync (gloo)** | Routes vLLM weight synchronization through a CPU-staged gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **In Progress** |
 
-*Combined with the 3 PRs from last month (oneCCL logging, distributed-backend, loss-aggregation),
-this brings the total to 7 upstream PRs.*
+*Combined with the 3 PRs from last month, this brings the total to 7 upstream PRs.*
 
 ---
 
@@ -64,6 +62,7 @@ rollouts, real DeepSpeed training, weights synced every step.
 | DPO | ✅ | ✅ |
 | PPO-with-critic | — | ✅ |
 
+PPO-with-critic is multi-XPU only — actor, critic, and vLLM engine don't co-fit on a single device.
 **NVIDIA control run:** GRPO and PPO-with-critic validated end-to-end on multi-GPU CUDA — no
 regression from the device-agnostic changes.
 
