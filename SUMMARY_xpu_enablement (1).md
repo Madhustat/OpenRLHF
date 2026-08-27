@@ -21,8 +21,7 @@ workflows.**
 - **Six training workflows have been validated:** GRPO, REINFORCE, RLOO, SFT, reward-model
   training, and DPO passed on single-XPU and multi-XPU configurations. 
 - **Trainer-to-vLLM weight synchronization is working:** The CPU-staged Gloo path completed
-  repeated synchronization across the validated workflows. A direct XPU-to-XPU path was also
-  validated separately in a Docker container as a future performance optimization.
+  repeated synchronization across the validated workflows.
 - **Four PRs cover the core enablement:** Two have been submitted upstream, and the remaining two
   are implemented and submission is in progress'.
 - **NVIDIA regression validation is complete:** RL workflows were revalidated end to
