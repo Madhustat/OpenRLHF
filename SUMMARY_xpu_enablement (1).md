@@ -25,7 +25,7 @@ workflows.**
   repeated synchronization across the validated workflows. A direct XPU-to-XPU path was also
   validated separately in a Docker container as a future performance optimization.
 - **Four PRs cover the core enablement:** Two have been submitted upstream, and the remaining two
-  are implemented and in progress.
+  are implemented and submission is in progress'.
 - **NVIDIA regression validation is complete:** GRPO and PPO-with-critic were revalidated end to
   end on multi-GPU CUDA, with no regression observed in the tested workflows.
 
