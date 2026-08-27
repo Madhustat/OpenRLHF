@@ -30,7 +30,7 @@ plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now
 - **Weight synchronization proven both ways** — the shipping default (CPU-staged) runs every step
   across the full suite; a **direct XPU-to-XPU path** was additionally validated in an isolated
   container as the next-step optimization.
-- **4 more PRs** covering the core enablement — 2 submitted upstream, 2 are in progress.
+- **4 PRs** covering the core enablement — 2 submitted upstream, 2 are in progress.
 - **No NVIDIA regression by design** — one code path, no Intel-vs-NVIDIA branching; NVIDIA
   re-validated end-to-end.
 
@@ -38,7 +38,7 @@ plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now
 
 ## The 4 new PRs (the core enablement)
 
-These are the pieces that were "work in progress" last month — now implemented, tested, and
+These are the pieces that were "work in progress" Since the last update — now implemented, tested, and
 moving upstream.
 
 | PR | Delivers | Status |
@@ -48,7 +48,7 @@ moving upstream.
 | **vLLM device pinning** | Pins each vLLM rollout worker to its assigned Intel device (XPU uses a different visibility variable than NVIDIA), so workers don't collide on device 0. | **Ready to submit** |
 | **vLLM weight sync (gloo)** | Routes vLLM weight synchronization through a CPU-staged gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **In Progress** |
 
-*Combined with the 3 PRs from last month, this brings the total to 7 upstream PRs.*
+*Combined with the 3 PRs from Since the last update, this brings the total to 7 upstream PRs.*
 
 ---
 
