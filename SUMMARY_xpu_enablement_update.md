@@ -17,7 +17,7 @@ enablement is now landing upstream as **4 more PRs**.
 
 - **Full RLHF loop runs end-to-end on Intel XPU** — validated on both a **single XPU** and
   **multiple XPUs**, spanning the complete Ray + vLLM + DeepSpeed stack.
-- **Every training variant validated E2E** — GRPO, REINFORCE, RLOO, SFT, RM, DPO, and
+- **Every training variant validated E2E with 10 steps** — GRPO, REINFORCE, RLOO, SFT, RM, DPO, and
   PPO-with-critic.
 - **Weight synchronization proven both ways** — the shipping default (CPU-staged) runs every step
   across the full suite; a **direct XPU-to-XPU path** was additionally validated in an isolated
