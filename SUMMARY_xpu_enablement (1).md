@@ -43,7 +43,7 @@ and tested. Two have been submitted upstream, and two are being prepared for sub
 | **vLLM device pinning** | Pins each vLLM rollout worker to the Intel XPU assigned by Ray. Intel XPU uses `ZE_AFFINITY_MASK` for device visibility, whereas NVIDIA uses `CUDA_VISIBLE_DEVICES`. Configuring the correct variable prevents multiple workers from selecting the same physical XPU.| **In progress** |
 | **vLLM weight sync (Gloo)** | Routes vLLM weight synchronization through a CPU-staged Gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **In progress** |
 
-Together with the three previously submitted test-focused PRs, the current contribution count is:
+Together with the three previously submitted test-focused PRs, the current PR count is:
 
 | Contribution | Count |
 |---|:---:|
