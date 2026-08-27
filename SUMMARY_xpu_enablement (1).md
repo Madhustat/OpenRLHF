@@ -19,14 +19,14 @@ workflows.**
 - **The complete OpenRLHF pipeline runs end to end on Intel XPU:** The Ray, vLLM, and DeepSpeed
   stack has been validated on both single-XPU and multi-XPU configurations.
 - **Seven training workflows have been validated:** GRPO, REINFORCE, RLOO, SFT, reward-model
-  training, and DPO passed on single-XPU and multi-XPU configurations. PPO with critic was
+  training, and DPO passed on single-XPU and multi-XPU configurations. PPO-with-critic was
   validated on multi-XPU.
 - **Trainer-to-vLLM weight synchronization is working:** The CPU-staged Gloo path completed
   repeated synchronization across the validated workflows. A direct XPU-to-XPU path was also
   validated separately in a Docker container as a future performance optimization.
 - **Four PRs cover the core enablement:** Two have been submitted upstream, and the remaining two
   are implemented and in progress.
-- **NVIDIA regression validation is complete:** GRPO and PPO with critic were revalidated end to
+- **NVIDIA regression validation is complete:** GRPO and PPO-with-critic were revalidated end to
   end on multi-GPU CUDA, with no regression observed in the tested workflows.
 
 ---
@@ -41,7 +41,7 @@ and tested. Two have been submitted upstream, and two are being prepared for sub
 | **Device-agnostic APIs** | Migrates the framework from CUDA-specific calls to PyTorch's device-agnostic accelerator APIs — the bulk of the enablement. | **Submitted** |
 | **Optional flash-attn imports** | `flash_attn` is a CUDA-only package that OpenRLHF imported unconditionally, so the model stack wouldn't even import on XPU. Now falls back to equivalent PyTorch implementations when it's absent; the NVIDIA path is unchanged. | **Submitted** |
 | **vLLM device pinning** | Pins each vLLM rollout worker to the Intel XPU assigned by Ray. Intel XPU uses `ZE_AFFINITY_MASK` for device visibility, whereas NVIDIA uses `CUDA_VISIBLE_DEVICES`. Configuring the correct variable prevents multiple workers from selecting the same physical XPU.| **In progress** |
-| **vLLM weight sync (gloo)** | Routes vLLM weight synchronization through a CPU-staged gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **In progress** |
+| **vLLM weight sync (Gloo)** | Routes vLLM weight synchronization through a CPU-staged Gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **In progress** |
 
 Together with the three previously submitted test-focused PRs, the current contribution count is:
 
@@ -73,7 +73,7 @@ The overall enablement effort and longer-term work are tracked through:
 The full training loop was exercised, not just unit-tested — real Ray orchestration, real vLLM
 rollouts, real DeepSpeed training, weights synced every step.
 
-| Training variant | Single XPU | Multi-XPU |
+| Training workflow | Single XPU | Multi-XPU |
 |---|:---:|:---:|
 | GRPO | ✅ | ✅ |
 | REINFORCE | ✅ | ✅ |
@@ -106,7 +106,7 @@ essential for RLHF. We validated two paths:
 
 ## Next steps
 
-1. **Upstream the last 2 PRs** (device pinning + gloo weight sync), in dependency order behind the
+1. **Upstream the last 2 PRs** (device pinning + Gloo weight sync), in dependency order behind the
    device-agnostic PR.
 2. **End-to-end use cases** — identify suitable use cases and implement an E2E example for each
    training method.
