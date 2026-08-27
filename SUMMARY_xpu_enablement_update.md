@@ -3,9 +3,9 @@
 ## Quick recap
 
 - **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0
-  blocked (2 new in #1267, 2 new in #1269, 8 existing extended in #1268).
--**Three unit-test-backed PRs submitted upstream for review
-
+  blocked (2 new in #1267, 8 existing extended in #1268, 2 new in #1269).
+- **5 of the planned 7 PRs are submitted upstream**, all open for review, plus a roadmap issue
+  tracking the overall effort.
 
 | Upstream | Title | Type | Status |
 |---|---|---|:---:|
@@ -21,8 +21,6 @@ loop validated end-to-end on Intel XPU — single *and* multi-XPU — across eve
 plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
 as **4 more PRs**.
 
-- **5 of the planned 7 PRs are submitted upstream**, all open for review, plus a roadmap issue
-  tracking the overall effort.
 
 ## Headline
 
