@@ -16,15 +16,28 @@ loop validated end-to-end on Intel XPU — single *and* multi-XPU — across eve
 plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
 as **4 more PRs**.
 
-**Upstream references**
+## Quick recap
 
-| Area | Links |
-|---|---|
-| Test coverage | [#1267](https://github.com/OpenRLHF/OpenRLHF/pull/1267) · [#1268](https://github.com/OpenRLHF/OpenRLHF/pull/1268) · [#1269](https://github.com/OpenRLHF/OpenRLHF/pull/1269) |
-| Core enablement | [#1301](https://github.com/OpenRLHF/OpenRLHF/pull/1301) · [#1302](https://github.com/OpenRLHF/OpenRLHF/pull/1302) |
-| Roadmap issue | [#1303](https://github.com/OpenRLHF/OpenRLHF/issues/1303) |
+- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0 blocked.
+- **Five PRs submitted upstream** for review, tracked under a roadmap issue.
 
-*All 5 PRs are open for review upstream; #1303 tracks the overall XPU enablement effort.*
+**Submitted PRs**
+
+- [#1267](https://github.com/OpenRLHF/OpenRLHF/pull/1267): Propagate oneCCL log level to Ray workers — 2 new tests
+- [#1268](https://github.com/OpenRLHF/OpenRLHF/pull/1268): Run loss-aggregation checks on available accelerators — 8 existing tests extended to the accelerator
+- [#1269](https://github.com/OpenRLHF/OpenRLHF/pull/1269): Add device-generic distributed-backend smoke tests — 2 new tests
+- [#1301](https://github.com/OpenRLHF/OpenRLHF/pull/1301): Use device-agnostic PyTorch accelerator APIs — the bulk of the enablement
+- [#1302](https://github.com/OpenRLHF/OpenRLHF/pull/1302): Make flash_attn utility imports optional — the model stack now imports on XPU
+
+**Roadmap issue**
+
+- [#1303](https://github.com/OpenRLHF/OpenRLHF/issues/1303): [Roadmap] OpenRLHF on Intel XPU — Intel XPU support for the Ray + vLLM + DeepSpeed training path
+
+**Since the last update:** we've moved from a working single-XPU prototype to **the full training
+loop validated end-to-end on Intel XPU — single *and* multi-XPU — across every training variant**,
+plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
+as **4 more PRs**.
+
 
 ## Headline
 
