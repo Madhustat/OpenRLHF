@@ -18,25 +18,25 @@ as **4 more PRs**.
 
 ## Quick recap
 
-- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0 blocked.
-- **Five PRs submitted upstream** for review, tracked under a roadmap issue.
+- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0
+  blocked (2 new in #1267, 2 new in #1269, 8 existing extended in #1268).
+- **5 of the planned 7 PRs are submitted upstream**, all open for review, plus a roadmap issue
+  tracking the overall effort.
 
-**Submitted PRs**
-
-- [#1267](https://github.com/OpenRLHF/OpenRLHF/pull/1267): Propagate oneCCL log level to Ray workers — 2 new tests
-- [#1268](https://github.com/OpenRLHF/OpenRLHF/pull/1268): Run loss-aggregation checks on available accelerators — 8 existing tests extended to the accelerator
-- [#1269](https://github.com/OpenRLHF/OpenRLHF/pull/1269): Add device-generic distributed-backend smoke tests — 2 new tests
-- [#1301](https://github.com/OpenRLHF/OpenRLHF/pull/1301): Use device-agnostic PyTorch accelerator APIs — the bulk of the enablement
-- [#1302](https://github.com/OpenRLHF/OpenRLHF/pull/1302): Make flash_attn utility imports optional — the model stack now imports on XPU
-
-**Roadmap issue**
-
-- [#1303](https://github.com/OpenRLHF/OpenRLHF/issues/1303): [Roadmap] OpenRLHF on Intel XPU — Intel XPU support for the Ray + vLLM + DeepSpeed training path
+| Upstream | Title | Type | Status |
+|---|---|---|:---:|
+| [#1267](https://github.com/OpenRLHF/OpenRLHF/pull/1267) | test: propagate oneCCL log level to Ray workers | PR | Open |
+| [#1268](https://github.com/OpenRLHF/OpenRLHF/pull/1268) | test: run loss aggregation checks on accelerators | PR | Open |
+| [#1269](https://github.com/OpenRLHF/OpenRLHF/pull/1269) | test: add device-generic distributed backend smoke tests | PR | Open |
+| [#1301](https://github.com/OpenRLHF/OpenRLHF/pull/1301) | use device-agnostic PyTorch accelerator APIs | PR | Open |
+| [#1302](https://github.com/OpenRLHF/OpenRLHF/pull/1302) | make flash_attn utility imports optional | PR | Open |
+| [#1303](https://github.com/OpenRLHF/OpenRLHF/issues/1303) | [Roadmap] OpenRLHF on Intel XPU | Issue | Open |
 
 **Since the last update:** we've moved from a working single-XPU prototype to **the full training
 loop validated end-to-end on Intel XPU — single *and* multi-XPU — across every training variant**,
 plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
 as **4 more PRs**.
+
 
 
 ## Headline
