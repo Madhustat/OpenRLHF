@@ -8,8 +8,7 @@
 - **Three unit-test-backed PRs submitted upstream** for review.
 - **OpenRLHF fully enabled on a single Intel XPU** for the validated RLHF workflows.
 
-**Since the last update:** we've moved from single-XPU only to **the full training loop validated
-end-to-end on Intel XPU — single *and* multi-XPU — across every training variant**.
+**Since the last update, we’ve progressed from a single-XPU prototype to full end-to-end validation on both single-XPU and multi-XPU configurations across all applicable training workflows.**
 
 ---
 
