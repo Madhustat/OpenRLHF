@@ -16,6 +16,14 @@ loop validated end-to-end on Intel XPU — single *and* multi-XPU — across eve
 plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
 as **4 more PRs**.
 
+Submitted PR's and issue
+#1267: Propagate oneCCL log level to Ray workers
+#1268: Run loss-aggregation checks on available accelerators
+#1269: Add device-generic distributed-backend smoke tests
+#1301: Use device-agnostic PyTorch accelerator APIs
+#1302: Make flash_attn utility imports optional
+#1303 Issue 
+
 ## Headline
 
 - **Full RLHF loop runs end-to-end on Intel XPU** — validated on both a **single XPU** and
