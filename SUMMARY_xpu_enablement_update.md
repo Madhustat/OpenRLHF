@@ -2,27 +2,24 @@
 
 ## Quick recap
 
-- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0 blocked.
-- **Three unit-test-backed PRs submitted upstream** for review.
+- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0
+  blocked (2 new in #1267, 2 new in #1269, 8 existing extended in #1268).
+- **5 of the planned 7 PRs are submitted upstream**, all open for review, plus a roadmap issue
+  tracking the overall effort.
 
-| PR | Delivers |
-|---|---|
-| **oneCCL logging** | Intel's oneCCL logs correctly alongside NVIDIA's — 2 new tests. |
-| **Distributed-backend** | Real multi-process comms verified per vendor (auto-selects backend) — 2 new tests. |
-| **Loss-aggregation** | 8 existing tests extended to run on the accelerator, not just CPU. |
+| Upstream | Title | Type | Status |
+|---|---|---|:---:|
+| [#1267](https://github.com/OpenRLHF/OpenRLHF/pull/1267) | test: propagate oneCCL log level to Ray workers | PR | Open |
+| [#1268](https://github.com/OpenRLHF/OpenRLHF/pull/1268) | test: run loss aggregation checks on accelerators | PR | Open |
+| [#1269](https://github.com/OpenRLHF/OpenRLHF/pull/1269) | test: add device-generic distributed backend smoke tests | PR | Open |
+| [#1301](https://github.com/OpenRLHF/OpenRLHF/pull/1301) | use device-agnostic PyTorch accelerator APIs | PR | Open |
+| [#1302](https://github.com/OpenRLHF/OpenRLHF/pull/1302) | make flash_attn utility imports optional | PR | Open |
+| [#1303](https://github.com/OpenRLHF/OpenRLHF/issues/1303) | [Roadmap] OpenRLHF on Intel XPU | Issue | Open |
 
 **Since the last update:** we've moved from a working single-XPU prototype to **the full training
 loop validated end-to-end on Intel XPU — single *and* multi-XPU — across every training variant**,
 plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
 as **4 more PRs**.
-
-Submitted PR's and issue
-#1267: Propagate oneCCL log level to Ray workers
-#1268: Run loss-aggregation checks on available accelerators
-#1269: Add device-generic distributed-backend smoke tests
-#1301: Use device-agnostic PyTorch accelerator APIs
-#1302: Make flash_attn utility imports optional
-#1303 Issue 
 
 ## Headline
 
