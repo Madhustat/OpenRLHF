@@ -3,7 +3,7 @@
 ## Quick recap
 
 - **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0
-  blocked (2 new in #1267, 2 new in #1269, 8 existing extended in #1268).
+  blocked.
 - **5 of the planned 7 PRs are submitted upstream**, all open for review, plus a roadmap issue
   tracking the overall effort.
 
