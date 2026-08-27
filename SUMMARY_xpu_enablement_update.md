@@ -22,7 +22,7 @@ enablement is now landing upstream as **4 more PRs**.
 - **Weight synchronization proven both ways** — the shipping default (CPU-staged) runs every step
   across the full suite; a **direct XPU-to-XPU path** was additionally validated in an isolated
   container as the next-step optimization.
-- **4 more PRs** covering the core enablement — 2 submitted upstream, 2 ready to submit.
+- **4 more PRs** covering the core enablement — 2 submitted upstream, 2 are in progress.
 - **No NVIDIA regression by design** — one code path, no Intel-vs-NVIDIA branching; NVIDIA
   re-validated end-to-end.
 
@@ -36,9 +36,9 @@ moving upstream.
 | PR | Delivers | Status |
 |---|---|---|
 | **Device-agnostic APIs** | Migrates the framework from CUDA-specific calls to PyTorch's device-agnostic accelerator APIs — the bulk of the enablement. | **Submitted** |
-| **Optional attention dep** | Makes a CUDA-only attention dependency optional, so the model stack imports and runs on XPU. | **Submitted** |
+| Optional flash-attn imports | flash_attn is a CUDA-only package that OpenRLHF imported unconditionally, so the model stack wouldn't even import on XPU. Now falls back to equivalent PyTorch implementations when it's absent; the NVIDIA path is unchanged. | Submitted |
 | **vLLM device pinning** | Pins each vLLM rollout worker to its assigned Intel device (XPU uses a different visibility variable than NVIDIA), so workers don't collide on device 0. | **Ready to submit** |
-| **vLLM weight sync (gloo)** | Routes vLLM weight synchronization through a CPU-staged gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **Ready to submit** |
+| **vLLM weight sync (gloo)** | Routes vLLM weight synchronization through a CPU-staged gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **In Progress** |
 
 *Combined with the 3 PRs from last month (oneCCL logging, distributed-backend, loss-aggregation),
 this brings the total to 7 upstream PRs.*
@@ -92,5 +92,6 @@ This month:   full E2E on 1 + N XPUs, all variants  |  4 core PRs (2 up, 2 ready
 
 1. **Upstream the last 2 PRs** (device pinning + gloo weight sync), in dependency order behind the
    device-agnostic PR.
-2. **Broaden hardware coverage** — larger multi-XPU and multi-node scale.
+2.  **End-to-end use cases** — identify suitable use cases and implement an E2E example for each
+   training method.
 3. **Land the direct XPU-to-XPU path** as a follow-up optimization once native Intel wheels ship.
