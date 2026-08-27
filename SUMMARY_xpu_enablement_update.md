@@ -18,8 +18,7 @@
 
 **Since the last update:** we've moved from a working single-XPU prototype to **the full training
 loop validated end-to-end on Intel XPU — single *and* multi-XPU — across every training variant**,
-plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
-as **4 more PRs**.
+plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream as 4 PRs — 2 submitted and under review, 2 still to be submitted.
 
 
 ## Headline
