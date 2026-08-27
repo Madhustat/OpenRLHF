@@ -5,24 +5,15 @@ one pipeline for reinforcement-learning post-training (the technique behind alig
 We have brought that full Ray + vLLM + DeepSpeed stack to Intel XPU — using the same
 device-agnostic code path that NVIDIA runs on, with no NVIDIA regression.
 
+Goal: Make OpenRLHF's full training loop run on Intel XPU — orchestration (Ray), rollout generation (vLLM), and distributed training (DeepSpeed) working together on Intel hardware — through upstream-friendly, device-agnostic changes that preserve existing NVIDIA/CUDA behavior.
+
 **Since the last update:** we've moved from "3 test-backed PRs and a working single-XPU
-prototype" to **the full training loop validated end-to-end on Intel XPU — single *and* multi-XPU —
+prototype" to  **the full training loop validated end-to-end on Intel XPU — single *and* multi-XPU —
 across every training variant**, plus a proven direct XPU-to-XPU weight-transfer path. The core
 enablement is now landing upstream as **4 more PRs**.
 
----
 
-## Why this matters
-
-RLHF post-training is currently a CUDA-first world. Making OpenRLHF run on Intel XPU means the
-full alignment pipeline — orchestration, rollout generation, and distributed training — can run
-on Intel hardware without a separate, forked codebase. We did this through **one device-agnostic
-code path** that adapts to the hardware at runtime, so NVIDIA and Intel share the same lines of
-code and NVIDIA behavior is preserved by design.
-
----
-
-## Headline
+## Headline or summary
 
 - **Full RLHF loop runs end-to-end on Intel XPU** — validated on both a **single XPU** and
   **multiple XPUs**, spanning the complete Ray + vLLM + DeepSpeed stack.
