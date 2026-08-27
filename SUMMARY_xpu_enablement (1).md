@@ -98,10 +98,9 @@ essential for RLHF. We validated two paths:
 - **Current portable path: CPU-staged Gloo broadcast.** Gloo is provided by PyTorch and does not
   require a vendor-specific collective library. It completed weight synchronization throughout the
   validated single-XPU and multi-XPU workflows.
-- **Performance optimization: direct XPU-to-XPU transfer.** This path was validated using a newer
-  PyTorch and vLLM XPU stack in a Docker container, completing a multi-step GRPO run across two
-  physical XPUs. It removes the CPU staging step and can be adopted when the required Intel
-  software stack is available through the standard installation path.
+- **Performance optimization: direct XPU-to-XPU transfer.** This path was validated in a Docker container using a newer XPU software stack
+  (`vllm/vllm-openai-xpu:v0.27.1`, PyTorch 2.13, and vLLM 0.27), completing a multi-step GRPO run across two physical XPUs. It removes the CPU staging step
+  and can be adopted when the required Intel software stack is available   through the standard installation path.
 
 ---
 
