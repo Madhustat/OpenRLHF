@@ -40,7 +40,7 @@ and tested. Two have been submitted upstream, and two are being prepared for sub
 |---|---|:---:|
 | **Device-agnostic APIs** | Migrates the framework from CUDA-specific calls to PyTorch's device-agnostic accelerator APIs — the bulk of the enablement. | **Submitted** |
 | **Optional flash-attn imports** | `flash_attn` is a CUDA-only package that OpenRLHF imported unconditionally, so the model stack wouldn't even import on XPU. Now falls back to equivalent PyTorch implementations when it's absent; the NVIDIA path is unchanged. | **Submitted** |
-| **vLLM device pinning** | Pins each vLLM rollout worker to its assigned Intel device (XPU uses a different visibility variable than NVIDIA), so workers don't collide on device 0. | **In progress** |
+| **vLLM device pinning** | Pins each vLLM rollout worker to the Intel XPU assigned by Ray. Intel XPU uses `ZE_AFFINITY_MASK` for device visibility, whereas NVIDIA uses `CUDA_VISIBLE_DEVICES`. Configuring the correct variable prevents multiple workers from selecting the same physical XPU.| **In progress** |
 | **vLLM weight sync (gloo)** | Routes vLLM weight synchronization through a CPU-staged gloo broadcast when NCCL/RCCL is unavailable (e.g. Intel XPU), so updated weights actually reach the rollout engine instead of being silently dropped. | **In progress** |
 
 Together with the three previously submitted test-focused PRs, the current contribution count is:
