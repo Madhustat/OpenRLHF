@@ -85,19 +85,17 @@ regression from the device-agnostic changes.
 
 ---
 
-## Weight synchronization: two validated paths
+## Weight synchronization:
 
-After each training update, the latest policy weights must be transferred to the vLLM rollout engine so that subsequent rollouts use the updated model.
+After each training update, the latest policy weights must be transferred to
+the vLLM rollout engine so that subsequent rollouts use the updated model.
 
-We first enabled a portable Gloo-based path that works with the currently supported OpenRLHF software stack. In parallel, we evaluated direct XPU-to-XPU
-transfer as the longer-term performance path. Both approaches have been validated:
+We enabled a portable CPU-staged Gloo broadcast path that works with the
+currently supported OpenRLHF software stack. Gloo is provided by PyTorch and
+does not require a vendor-specific collective library.
 
-- **Current portable path: CPU-staged Gloo broadcast.** Gloo is provided by PyTorch and does not
-  require a vendor-specific collective library. It completed weight synchronization throughout the
-  validated single-XPU and multi-XPU workflows.
-- **Performance optimization: direct XPU-to-XPU transfer.** This path was validated in a Docker container using a newer XPU software stack
-  (`vllm/vllm-openai-xpu:v0.27.1`, PyTorch 2.13, and vLLM 0.27), completing a multi-step GRPO run across two physical XPUs. It removes the CPU staging step
-  and can be adopted when the required Intel software stack is available   through the standard installation path.
+The Gloo path completed repeated weight synchronization throughout the
+validated single-XPU and multi-XPU workflows.
 
 ---
 
@@ -105,5 +103,6 @@ transfer as the longer-term performance path. Both approaches have been validate
 
 1. **Upstream the last 2 PRs** (device pinning + Gloo weight sync), in dependency order behind the
    device-agnostic PR.
-2. **End-to-end use cases** — identify suitable use cases and implement an E2E example for each
+2. **Explore direct XPU-to-XPU weight synchronization using the latest compatible software stack**
+3. **End-to-end use cases** — identify suitable use cases and implement an E2E example for each
    training method.
