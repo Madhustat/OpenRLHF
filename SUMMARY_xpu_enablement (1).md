@@ -35,7 +35,6 @@ moving upstream.
 
 *Combined with the 3 PRs from Since the last update, this brings the total to 7 upstream PRs.*
 
-*Combined with the 3 PRs from Since the last update, this brings the total to 7 upstream PRs.*
 | Upstream | Title | Type | Status |
 |---|---|---|:---:|
 | [#1267](https://github.com/OpenRLHF/OpenRLHF/pull/1267) | test: propagate oneCCL log level to Ray workers | PR | Open |
