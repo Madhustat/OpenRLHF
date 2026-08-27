@@ -9,7 +9,7 @@
 - **A single-XPU prototype was working** across the validated OpenRLHF workflows.
 
 **Since the last update, we've progressed from a single-XPU prototype to full end-to-end
-validation on both single-XPU and multi-XPU configurations across all applicable training
+validation on both single-XPU and multi-XPU configurations across applicable training
 workflows.**
 
 ---
@@ -25,7 +25,7 @@ workflows.**
   validated separately in a Docker container as a future performance optimization.
 - **Four PRs cover the core enablement:** Two have been submitted upstream, and the remaining two
   are implemented and submission is in progress'.
-- **NVIDIA regression validation is complete:** GRPO and PPO-with-critic were revalidated end to
+- **NVIDIA regression validation is complete:** RL workflows were revalidated end to
   end on multi-GPU CUDA, with no regression observed in the tested workflows.
 
 ---
@@ -81,7 +81,7 @@ rollouts, real DeepSpeed training, weights synced every step.
 | RM (reward model) | ✅ | ✅ |
 | DPO | ✅ | ✅ |
 
-**NVIDIA control run:** GRPO and PPO-with-critic validated end-to-end on multi-GPU CUDA — no
+**NVIDIA control run:**  RL workflow validated end-to-end on multi-GPU CUDA — no
 regression from the device-agnostic changes.
 
 ---
