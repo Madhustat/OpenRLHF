@@ -18,9 +18,8 @@ workflows.**
 
 - **The complete OpenRLHF pipeline runs end to end on Intel XPU:** The Ray, vLLM, and DeepSpeed
   stack has been validated on both single-XPU and multi-XPU configurations.
-- **Seven training workflows have been validated:** GRPO, REINFORCE, RLOO, SFT, reward-model
-  training, and DPO passed on single-XPU and multi-XPU configurations. PPO-with-critic was
-  validated on multi-XPU.
+- **Six training workflows have been validated:** GRPO, REINFORCE, RLOO, SFT, reward-model
+  training, and DPO passed on single-XPU and multi-XPU configurations. 
 - **Trainer-to-vLLM weight synchronization is working:** The CPU-staged Gloo path completed
   repeated synchronization across the validated workflows. A direct XPU-to-XPU path was also
   validated separately in a Docker container as a future performance optimization.
@@ -81,9 +80,6 @@ rollouts, real DeepSpeed training, weights synced every step.
 | SFT | ✅ | ✅ |
 | RM (reward model) | ✅ | ✅ |
 | DPO | ✅ | ✅ |
-| PPO-with-critic | n/a | ✅ |
-
-PPO-with-critic is multi-XPU only — actor, critic, and vLLM engine don't co-fit on a single device.
 
 **NVIDIA control run:** GRPO and PPO-with-critic validated end-to-end on multi-GPU CUDA — no
 regression from the device-agnostic changes.
