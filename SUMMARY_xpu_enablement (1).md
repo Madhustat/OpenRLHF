@@ -92,8 +92,10 @@ regression from the device-agnostic changes.
 
 ## Weight synchronization: two validated paths
 
-Keeping the policy weights and the vLLM rollout engine synchronized after each training update is
-essential for RLHF. We validated two paths:
+After each training update, the latest policy weights must be transferred to the vLLM rollout engine so that subsequent rollouts use the updated model.
+
+We first enabled a portable Gloo-based path that works with the currently supported OpenRLHF software stack. In parallel, we evaluated direct XPU-to-XPU
+transfer as the longer-term performance path. Both approaches have been validated:
 
 - **Current portable path: CPU-staged Gloo broadcast.** Gloo is provided by PyTorch and does not
   require a vendor-specific collective library. It completed weight synchronization throughout the
