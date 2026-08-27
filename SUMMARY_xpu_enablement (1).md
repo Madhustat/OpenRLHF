@@ -26,6 +26,48 @@
   re-validated end-to-end.
 
 ---
+# Enabling Intel XPU for OpenRLHF: Progress Update
+
+## Quick Recap
+
+**At the last update:**
+
+- **XPU-runnable tests were passing at 100%:** All 12 tests passed, with no
+  failures or blocked tests.
+- **Three test-focused PRs had been submitted upstream** for review.
+- **A single-XPU prototype was working** across the validated OpenRLHF
+  workflows.
+
+**Since the last update, we have progressed from a single-XPU prototype to
+full end-to-end validation on both single-XPU and multi-XPU configurations
+across all applicable training workflows.**
+
+---
+
+## Headline as of Today
+
+- **The complete OpenRLHF pipeline runs end to end on Intel XPU:** The Ray,
+  vLLM, and DeepSpeed stack has been validated on both single-XPU and
+  multi-XPU configurations.
+
+- **Seven training workflows have been validated:** GRPO, REINFORCE, RLOO,
+  SFT, reward-model training, and DPO passed on single-XPU and multi-XPU
+  configurations. PPO with critic was validated on multi-XPU.
+
+- **Trainer-to-vLLM weight synchronization is working:** The CPU-staged Gloo
+  path completed repeated synchronization across the validated workflows. A
+  direct XPU-to-XPU path was also validated separately in a Docker container
+  as a future performance optimization.
+
+- **Five of seven planned PRs have been submitted upstream:** The remaining
+  two PRs, covering vLLM device pinning and Gloo-based weight synchronization,
+  are implemented and undergoing internal review.
+
+- **NVIDIA regression validation is complete:** GRPO and PPO with critic were
+  revalidated end to end on multi-GPU CUDA, with no regression observed in
+  the tested workflows.
+
+---
 
 ## The 4 PRs (the core enablement)
 
