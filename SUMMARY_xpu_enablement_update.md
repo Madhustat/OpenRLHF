@@ -63,6 +63,7 @@ rollouts, real DeepSpeed training, weights synced every step.
 | PPO-with-critic | — | ✅ |
 
 PPO-with-critic is multi-XPU only — actor, critic, and vLLM engine don't co-fit on a single device.
+
 **NVIDIA control run:** GRPO and PPO-with-critic validated end-to-end on multi-GPU CUDA — no
 regression from the device-agnostic changes.
 
