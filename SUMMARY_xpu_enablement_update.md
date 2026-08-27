@@ -2,26 +2,10 @@
 
 ## Quick recap
 
-- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0 blocked.
-- **Three unit-test-backed PRs submitted upstream** for review.
-
-| PR | Delivers |
-|---|---|
-| **oneCCL logging** | Intel's oneCCL logs correctly alongside NVIDIA's — 2 new tests. |
-| **Distributed-backend** | Real multi-process comms verified per vendor (auto-selects backend) — 2 new tests. |
-| **Loss-aggregation** | 8 existing tests extended to run on the accelerator, not just CPU. |
-
-**Since the last update:** we've moved from a working single-XPU prototype to **the full training
-loop validated end-to-end on Intel XPU — single *and* multi-XPU — across every training variant**,
-plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
-as **4 more PRs**.
-
-## Quick recap
-
 - **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0
   blocked (2 new in #1267, 2 new in #1269, 8 existing extended in #1268).
-- **5 of the planned 7 PRs are submitted upstream**, all open for review, plus a roadmap issue
-  tracking the overall effort.
+-**Three unit-test-backed PRs submitted upstream for review
+
 
 | Upstream | Title | Type | Status |
 |---|---|---|:---:|
@@ -37,7 +21,8 @@ loop validated end-to-end on Intel XPU — single *and* multi-XPU — across eve
 plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
 as **4 more PRs**.
 
-
+- **5 of the planned 7 PRs are submitted upstream**, all open for review, plus a roadmap issue
+  tracking the overall effort.
 
 ## Headline
 
