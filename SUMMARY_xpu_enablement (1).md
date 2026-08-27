@@ -31,7 +31,7 @@ workflows.**
 
 ---
 
-## The 4 PRs (the core enablement)
+## The Four Core Enablement PRs
 
 These four contributions were work in progress at the last update. All four are now implemented
 and tested. Two have been submitted upstream, and two are being prepared for submission.
