@@ -64,7 +64,7 @@ Together with the three previously submitted test-focused PRs, the current contr
 | [#1303](https://github.com/OpenRLHF/OpenRLHF/issues/1303) | [Roadmap] OpenRLHF on Intel XPU | Issue | Open |
 
 The overall enablement effort and longer-term work are tracked through:
-[#1303: OpenRLHF on Intel XPU](https://github.com/OpenRLHF/OpenRLHF/issues/1303)
+ [#1303](https://github.com/OpenRLHF/OpenRLHF/issues/1303)
 
 ---
 
