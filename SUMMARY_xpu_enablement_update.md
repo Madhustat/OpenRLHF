@@ -1,16 +1,20 @@
 # Enabling Intel XPU for OpenRLHF — Progress Update
 
-**OpenRLHF — a leading open-source RLHF framework that unifies Ray, vLLM, and DeepSpeed** into
-one pipeline for reinforcement-learning post-training (the technique behind aligning modern LLMs).
-We have brought that full Ray + vLLM + DeepSpeed stack to Intel XPU — using the same
-device-agnostic code path that NVIDIA runs on, with no NVIDIA regression.
+## Quick recap
 
-Goal: Make OpenRLHF's full training loop run on Intel XPU — orchestration (Ray), rollout generation (vLLM), and distributed training (DeepSpeed) working together on Intel hardware — through upstream-friendly, device-agnostic changes that preserve existing NVIDIA/CUDA behavior.
+- **Unit tests: 100% pass on XPU** — all 12 XPU-runnable tests pass, with 0 failures and 0 blocked.
+- **Three unit-test-backed PRs submitted upstream** for review.
 
-**Since the last update:** we've moved from "3 test-backed PRs and a working single-XPU
-prototype" to  **the full training loop validated end-to-end on Intel XPU — single *and* multi-XPU —
-across every training variant**, plus a proven direct XPU-to-XPU weight-transfer path. The core
-enablement is now landing upstream as **4 more PRs**.
+| PR | Delivers |
+|---|---|
+| **oneCCL logging** | Intel's oneCCL logs correctly alongside NVIDIA's — 2 new tests. |
+| **Distributed-backend** | Real multi-process comms verified per vendor (auto-selects backend) — 2 new tests. |
+| **Loss-aggregation** | 8 existing tests extended to run on the accelerator, not just CPU. |
+
+**Since the last update:** we've moved from a working single-XPU prototype to **the full training
+loop validated end-to-end on Intel XPU — single *and* multi-XPU — across every training variant**,
+plus a proven direct XPU-to-XPU weight-transfer path. The core enablement is now landing upstream
+as **4 more PRs**.
 
 
 ## Headline or summary
