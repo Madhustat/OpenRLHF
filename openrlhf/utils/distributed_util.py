@@ -113,13 +113,14 @@ def resolve_vllm_sync_backend(backend=None):
     """Resolve and validate the vLLM weight-sync backend.
 
     When ``backend`` is None (unset), auto-select the best CORRECT backend for the platform:
-    NCCL/RCCL on CUDA/ROCm; XCCL on Intel XPU with >=2 physical devices (direct XPU->XPU); gloo
-    on a single XPU or otherwise. An explicitly configured backend is validated strictly and
-    honored where correct: an impossible combo (e.g. 'nccl' without CUDA/ROCm) raises; 'xccl' on
-    a single XPU falls back to gloo (oneCCL needs one rank per device, so single-XPU xccl is
-    incorrect).
+    NCCL/RCCL on CUDA/ROCm; XCCL on Intel XPU with >=2 physical devices and torch>=2.13 (direct
+    XPU->XPU, no CPU staging); gloo on a single XPU, on torch<2.13, or otherwise. An explicitly
+    configured backend is validated strictly and honored where correct: an impossible combo
+    (e.g. 'nccl' without CUDA/ROCm) raises; 'xccl' on a single XPU falls back to gloo (oneCCL
+    needs one rank per device, so single-XPU xccl is incorrect).
     """
     import torch
+    from packaging import version
 
     is_nccl_platform = bool(getattr(torch.version, "cuda", None) or getattr(torch.version, "hip", None))
     is_xpu_platform = bool(getattr(torch.version, "xpu", None)) and dist_xccl_available()
@@ -130,21 +131,26 @@ def resolve_vllm_sync_backend(backend=None):
     xpu_count = 0
     if is_xpu_platform:
         xpu_count = max(_physical_xpu_count(), torch.xpu.device_count())
+    # torch 2.12.0+xpu SEGFAULTS in ProcessGroupXCCL broadcast on Battlemage/PCIe
+    # (intel/torch-xpu-ops#4238); fixed in torch 2.13.0+xpu (E2E-validated: REINFORCE and
+    # PPO+critic both pass under colocate_all with xccl on 2 physical XPUs, ZeRO-2). ZeRO-3 in
+    # that same colocate_all+xccl+critic combination hit a real (dmesg-confirmed, intermittent,
+    # self-recovering) GPU engine timeout/reset on this hardware — unresolved, so xccl auto-
+    # selection here does not distinguish ZeRO stage; if you hit device-lost errors specifically
+    # with ZeRO-3+critic, pass --vllm.sync_backend gloo explicitly as a workaround.
+    xccl_torch_ok = is_xpu_platform and version.parse(torch.__version__.split("+")[0]) >= version.parse("2.13.0")
 
     if backend is None:
         # Auto-detect a CORRECT-AND-SAFE default for the platform:
-        #   - CUDA / ROCm -> nccl   (native GPU-to-GPU)
-        #   - Intel XPU   -> gloo   (CPU-staged; always safe)
-        #   - anything else -> gloo
-        # NOTE: auto does NOT pick xccl even with >=2 physical XPUs. XCCL is native XPU->XPU and
-        # in principle faster, but on this stack it is not a safe default: torch 2.12.0+xpu
-        # SEGFAULTS in ProcessGroupXCCL broadcast on Battlemage/PCIe (intel/torch-xpu-ops #4238,
-        # fixed in torch 2.13.0+xpu), and true PCIe P2P is unavailable across separate root ports
-        # (intel/compute-runtime #935/#942). So xccl stays STRICTLY OPT-IN via an explicit
-        # --vllm.sync_backend xccl; auto stays on the known-working gloo path. Revisit making
-        # xccl the XPU auto-default once torch>=2.13 is the pinned version.
+        #   - CUDA / ROCm             -> nccl  (native GPU-to-GPU)
+        #   - Intel XPU, >=2 physical
+        #     devices, torch>=2.13    -> xccl  (native XPU-to-XPU, no CPU staging, faster)
+        #   - Intel XPU otherwise     -> gloo  (CPU-staged; always safe)
+        #   - anything else           -> gloo
         if is_nccl_platform:
             effective_backend = "nccl"
+        elif is_xpu_platform and xpu_count >= 2 and xccl_torch_ok:
+            effective_backend = "xccl"
         else:
             effective_backend = "gloo"
         logger.info("vLLM weight-sync backend auto-selected: %s (xpu_count=%d)", effective_backend, xpu_count)

@@ -66,65 +66,81 @@ class _patch_count:
         return False
 
 
-def _patch_platform(cuda=None, hip=None, xpu=None, xccl=False, xpu_count=1):
+def _patch_platform(cuda=None, hip=None, xpu=None, xccl=False, xpu_count=1, torch_version="2.13.0+xpu"):
     return (
         patch("torch.version.cuda", cuda, create=True),
         patch("torch.version.hip", hip, create=True),
         patch("torch.version.xpu", xpu, create=True),
         patch("openrlhf.utils.distributed_util.dist_xccl_available", return_value=xccl),
         _patch_count(xpu_count),
+        patch("torch.__version__", torch_version),
     )
 
 
 @pytest.mark.parametrize(
-    "cuda,hip,xpu,xccl,xpu_count,requested,expected",
+    "cuda,hip,xpu,xccl,xpu_count,torch_version,requested,expected",
     [
-        # auto-detect (unset): nccl on CUDA/ROCm; gloo everywhere else. XPU auto stays gloo (the
-        # safe, known-working default) EVEN with >=2 devices - xccl is opt-in only, because
-        # torch 2.12.0+xpu segfaults in ProcessGroupXCCL on Battlemage/PCIe (torch-xpu-ops #4238).
-        ("12.1", None, None, False, 1, None, "nccl"),   # CUDA -> nccl
-        (None, "6.0", None, False, 1, None, "nccl"),    # ROCm -> nccl
-        (None, None, "20250", True, 2, None, "gloo"),   # XPU + xccl + 2 devices -> gloo (xccl NOT auto)
-        (None, None, "20250", True, 8, None, "gloo"),   # XPU + xccl + 8 devices -> gloo (xccl NOT auto)
-        (None, None, "20250", True, 1, None, "gloo"),   # XPU + xccl + 1 device  -> gloo
-        (None, None, "20250", False, 1, None, "gloo"),  # XPU without xccl -> gloo
-        (None, None, None, False, 1, None, "gloo"),     # nothing detected -> gloo
-        # explicit
-        ("12.1", None, None, False, 1, "nccl", "nccl"),
-        (None, None, "20250", True, 2, "xccl", "xccl"),  # explicit xccl + 2 XPU -> xccl (the real path)
-        (None, None, "20250", True, 1, "xccl", "gloo"),  # explicit xccl + 1 XPU -> falls back to gloo (no hang)
-        (None, None, "20250", True, 2, "gloo", "gloo"),  # explicit gloo on XPU -> honored
-        ("12.1", None, None, False, 1, "gloo", "gloo"),  # explicit gloo on CUDA -> honored
+        # auto-detect (unset): nccl on CUDA/ROCm. On XPU with >=2 physical devices AND
+        # torch>=2.13, xccl is now the auto default (native XPU->XPU, no CPU staging) - torch
+        # 2.12.0+xpu segfaults in ProcessGroupXCCL on Battlemage/PCIe (torch-xpu-ops#4238), fixed
+        # in 2.13.0+xpu (E2E-validated: REINFORCE + PPO/critic pass under colocate_all+xccl on 2
+        # physical XPUs, ZeRO-2). Below torch 2.13, or with <2 devices, gloo remains the default.
+        ("12.1", None, None, False, 1, "2.13.0+xpu", None, "nccl"),  # CUDA -> nccl
+        (None, "6.0", None, False, 1, "2.13.0+xpu", None, "nccl"),   # ROCm -> nccl
+        (None, None, "20250", True, 2, "2.13.0+xpu", None, "xccl"),  # XPU+xccl+2 devices+torch>=2.13 -> xccl
+        (None, None, "20250", True, 8, "2.13.0+xpu", None, "xccl"),  # XPU+xccl+8 devices+torch>=2.13 -> xccl
+        (None, None, "20250", True, 2, "2.12.0+xpu", None, "gloo"),  # same, but torch<2.13 -> gloo (segfault guard)
+        (None, None, "20250", True, 1, "2.13.0+xpu", None, "gloo"),  # XPU + xccl + 1 device  -> gloo
+        (None, None, "20250", False, 1, "2.13.0+xpu", None, "gloo"),  # XPU without xccl -> gloo
+        (None, None, None, False, 1, "2.13.0+xpu", None, "gloo"),  # nothing detected -> gloo
+        # explicit (unaffected by the torch-version gate - that only governs auto-detect)
+        ("12.1", None, None, False, 1, "2.13.0+xpu", "nccl", "nccl"),
+        (None, None, "20250", True, 2, "2.13.0+xpu", "xccl", "xccl"),  # explicit xccl + 2 XPU -> xccl
+        (None, None, "20250", True, 1, "2.13.0+xpu", "xccl", "gloo"),  # explicit xccl + 1 XPU -> falls back to gloo
+        (None, None, "20250", True, 2, "2.13.0+xpu", "gloo", "gloo"),  # explicit gloo on XPU -> honored
+        ("12.1", None, None, False, 1, "2.13.0+xpu", "gloo", "gloo"),  # explicit gloo on CUDA -> honored
     ],
 )
-def test_resolve_backend_auto_and_explicit(cuda, hip, xpu, xccl, xpu_count, requested, expected):
-    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda, hip, xpu, xccl, xpu_count)
-    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt:
+def test_resolve_backend_auto_and_explicit(cuda, hip, xpu, xccl, xpu_count, torch_version, requested, expected):
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver = _patch_platform(cuda, hip, xpu, xccl, xpu_count, torch_version)
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver:
         assert resolve_vllm_sync_backend(requested) == expected
 
 
 def test_resolve_backend_explicit_nccl_on_non_nccl_raises():
-    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda=None, hip=None, xpu="20250", xccl=True, xpu_count=2)
-    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, pytest.raises(RuntimeError, match="requires a CUDA or ROCm build"):
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver = _patch_platform(
+        cuda=None, hip=None, xpu="20250", xccl=True, xpu_count=2
+    )
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver, pytest.raises(
+        RuntimeError, match="requires a CUDA or ROCm build"
+    ):
         resolve_vllm_sync_backend("nccl")
 
 
 def test_resolve_backend_explicit_xccl_on_non_xpu_raises():
-    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda="12.1", hip=None, xpu=None, xccl=False, xpu_count=0)
-    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, pytest.raises(RuntimeError, match="requires an Intel XPU build"):
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver = _patch_platform(
+        cuda="12.1", hip=None, xpu=None, xccl=False, xpu_count=0
+    )
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver, pytest.raises(
+        RuntimeError, match="requires an Intel XPU build"
+    ):
         resolve_vllm_sync_backend("xccl")
 
 
 def test_resolve_backend_xccl_single_xpu_falls_back_to_gloo():
     # Explicit xccl on a single-XPU box must NOT hang - it falls back to gloo with a warning.
-    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda=None, hip=None, xpu="20250", xccl=True, xpu_count=1)
-    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt:
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver = _patch_platform(
+        cuda=None, hip=None, xpu="20250", xccl=True, xpu_count=1
+    )
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver:
         assert resolve_vllm_sync_backend("xccl") == "gloo"
 
 
 def test_resolve_backend_unknown_raises():
-    p_cuda, p_hip, p_xpu, p_xccl, p_cnt = _patch_platform(cuda="12.1", hip=None)
-    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, pytest.raises(ValueError, match="Unsupported vLLM weight-sync backend"):
+    p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver = _patch_platform(cuda="12.1", hip=None)
+    with p_cuda, p_hip, p_xpu, p_xccl, p_cnt, p_ver, pytest.raises(
+        ValueError, match="Unsupported vLLM weight-sync backend"
+    ):
         resolve_vllm_sync_backend("mpi")
 
 
