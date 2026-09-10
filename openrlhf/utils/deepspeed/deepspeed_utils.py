@@ -40,6 +40,17 @@ def get_train_ds_config(
     if overlap_comm:
         zero_opt_dict["overlap_comm"] = True
         zero_opt_dict["contiguous_gradients"] = True
+    elif stage == 3:
+        # DeepSpeed's own ZeRO config resolves overlap_comm=None to
+        # `self.stage == ZeroStageEnum.weights` (i.e. True for stage 3) whenever the key is
+        # absent -- so omitting it here to mean "False" silently becomes "True" for stage 3,
+        # the opposite of this function's own overlap_comm=False default. Confirmed root cause
+        # (2026-09) of a native SIGSEGV in oneCCL's background progress thread
+        # (ccl_worker_func -> ... -> urEventGetInfo -> libze_intel_gpu.so.1) on 2x Intel
+        # Battlemage B70 (PCIe, no XeLink) under the ATL/OFI transport -- a minimal DeepSpeed
+        # ZeRO-3 reproducer crashes 3/3 with this key absent and passes 3/3 (300 steps) with it
+        # explicitly set False, all other variables held constant. Must be written explicitly.
+        zero_opt_dict["overlap_comm"] = False
     if stage == 3:
         zero_opt_dict["reduce_scatter"] = True
 
