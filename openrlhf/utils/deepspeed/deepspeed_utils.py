@@ -159,6 +159,19 @@ def _z3_params_to_fetch(param_list):
     return [p for p in param_list if hasattr(p, "ds_id") and p.ds_status == ZeroParamStatus.NOT_AVAILABLE]
 
 
+def _optimizer_supports_state_offload(model):
+    """DeepSpeedZeroOptimizer_Stage3.offload_states() hard-asserts
+    `self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam` before touching either
+    OffloadStateTypeEnum.optim_states or .hp_params (deepspeed/runtime/zero/stage3.py, inside
+    offload_states()) -- both categories call into FusedAdam-specific helpers
+    (offload_adam_states / the fp32 master-weight buffers). The other three categories
+    (lp_params, lp_grads, contiguous_grad_buffer) never reference self.optimizer at all; they
+    only move DeepSpeed's own ZeRO-3 partition buffers, so they work with any optimizer.
+    """
+    inner_optimizer = getattr(model.optimizer, "optimizer", None)
+    return inner_optimizer is not None and inner_optimizer.__class__ is deepspeed.ops.adam.fused_adam.FusedAdam
+
+
 def offload_deepspeed_states(model, pin_memory=True, non_blocking=True):
     zero_stage = model.zero_optimization_stage()  # config['zero_optimization']['stage']
     adam_offload = model.config["zero_optimization"]["offload_optimizer"]["device"] == "cpu"
@@ -175,11 +188,16 @@ def offload_deepspeed_states(model, pin_memory=True, non_blocking=True):
     # if zero_stage == 3 and not adam_offload:
     from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 
+    fused_adam_capable = _optimizer_supports_state_offload(model)
+
     offload_state_types = [
-        OffloadStateTypeEnum.optim_states,
         OffloadStateTypeEnum.contiguous_grad_buffer,
-        OffloadStateTypeEnum.hp_params,
     ]
+    if fused_adam_capable:
+        offload_state_types += [
+            OffloadStateTypeEnum.optim_states,
+            OffloadStateTypeEnum.hp_params,
+        ]
 
     if version.parse(deepspeed.__version__) >= version.parse("0.16.5"):
         # These offload types are fixed in https://github.com/deepspeedai/DeepSpeed/pull/7050
@@ -187,6 +205,22 @@ def offload_deepspeed_states(model, pin_memory=True, non_blocking=True):
             OffloadStateTypeEnum.lp_grads,
             # OffloadStateTypeEnum.lp_params,
         ]
+
+    if not fused_adam_capable and not getattr(model, "_openrlhf_partial_sleep_logged", False):
+        inner = getattr(model.optimizer, "optimizer", None)
+        # Capability-based fallback, not a silent downgrade: this optimizer can't do the
+        # FusedAdam-only optim_states/hp_params offload, so those two categories stay resident
+        # on-device while everything else (gradients, the contiguous grad buffer, and -- on
+        # DeepSpeed >= 0.16.5 -- low-precision grads) is still offloaded. Confirmed root cause
+        # (2026-09) for why `--ds.enable_sleep` used to hard-crash with plain torch.optim.AdamW:
+        # `stage3.py:3285 AssertionError: Offloading is supported only for DeepSpeed FusedAdam`.
+        print(
+            f"[deepspeed sleep] partial offload mode: optimizer={type(inner).__name__} does not "
+            f"support FusedAdam-only state offload -- retaining optim_states, hp_params on-device; "
+            f"offloading {[t.name for t in offload_state_types]}",
+            flush=True,
+        )
+        model._openrlhf_partial_sleep_logged = True
 
     model.optimizer.offload_states(
         include=offload_state_types,
