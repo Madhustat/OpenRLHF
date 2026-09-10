@@ -9,9 +9,16 @@ unit tests, the multi-GPU E2E suite, and the single-GPU E2E suite.
 
 | Suite | File | Tests | Hardware | Time |
 |---|---|---|---|---|
-| Unit tests | `pytest tests/` | 86 | No GPU needed | ~40 s |
+| Unit tests | `pytest tests/` | 99 | No GPU needed¹ | ~55 s |
+| ZeRO-3 / DS-sleep fix regressions | `pytest tests/test_ppo_zero3_fixes_suite.py` | 9 | No GPU needed | ~5 s |
 | Multi-GPU E2E | `test_e2e_suite_multigpu.sh` | 28 | 2 physical GPUs | ~2 hrs |
 | Single-GPU E2E | `test_e2e_suite_singlegpu.sh` | 19 | 1 physical GPU | ~1 hr |
+
+¹ The 99 unit tests run without a GPU, but some (`test_gloo_weight_sync.py`,
+`test_distributed_backend_generic.py`, `test_loss_aggregation.py`) will use an XPU if one is
+present and skip/fall back to CPU if not. Verified: **99 passed in 54.5 s** on the torch 2.13
+stack described in
+[../docs/xpu_experimental/INSTALL_XPU.md](../docs/xpu_experimental/INSTALL_XPU.md).
 
 See `TESTS.md` for a full description of every test.
 
@@ -32,10 +39,13 @@ See `TESTS.md` for a full description of every test.
 ### Software
 | Component | Version used |
 |---|---|
-| PyTorch | 2.12.0+xpu |
-| vLLM | 0.23.1rc1 (source build — see INSTALL_XPU.md) |
+| PyTorch | 2.13.0+xpu |
+| vLLM | 0.27.2.dev0+g6e448d0ea (source build — see INSTALL_XPU.md) |
 | Ray | 2.55.0 |
-| oneAPI compiler | 2025.3 |
+| DeepSpeed | 0.19.1 |
+| transformers | 5.7.0 |
+| oneCCL | 2022.0.0 |
+| oneAPI compiler | **not installed** — `icpx` absent; set `OPENRLHF_DS_TORCH_ADAM=1` |
 
 See [../docs/xpu_experimental/INSTALL_XPU.md](../docs/xpu_experimental/INSTALL_XPU.md)
 to build this exact environment from scratch.
@@ -90,8 +100,8 @@ cd <your-clone>/OpenRLHF-multi
 
 ## Step 3 — Run the unit tests
 
-Unit tests require no GPU, no Ray cluster, and no model download.
-They complete in about 40 seconds.
+Unit tests require no Ray cluster and no model download.
+They complete in about 55 seconds.
 
 ```bash
 python -m pytest tests/ -q --ignore=tests/results
@@ -99,11 +109,12 @@ python -m pytest tests/ -q --ignore=tests/results
 
 **Expected output:**
 ```
-======================= 86 passed, 15 warnings in 37.09s =======================
+======================= 99 passed, 15 warnings in 54.51s =======================
 ```
 
 **Run a specific test file:**
 ```bash
+python -m pytest tests/test_ppo_zero3_fixes_suite.py -v   # ZeRO-3 / DS-sleep fixes
 python -m pytest tests/test_gloo_weight_sync.py -v
 python -m pytest tests/test_loss_aggregation.py -v
 python -m pytest tests/test_ring_attn_utils.py -v
@@ -111,6 +122,32 @@ python -m pytest tests/test_ray_env_vars.py -v
 python -m pytest tests/test_vllm_device_env.py -v
 python -m pytest tests/test_distributed_backend_generic.py -v
 ```
+
+### ZeRO-3 / DeepSpeed-sleep fix regressions
+
+One self-contained file covers all three fixes on this branch (see
+[../docs/xpu_experimental/ZERO3_DEEPSPEED_SLEEP_FIXES.md](../docs/xpu_experimental/ZERO3_DEEPSPEED_SLEEP_FIXES.md)).
+It needs **no GPU/XPU, no Ray, and no DeepSpeed accelerator runtime** — it checks the
+config-building logic and the trainer's source shape, which is what the fixes changed.
+
+```bash
+python -m pytest tests/test_ppo_zero3_fixes_suite.py -v
+# or, standalone:
+python tests/test_ppo_zero3_fixes_suite.py
+```
+
+**Expected output:**
+```
+========================= 9 passed, 15 warnings in 4.82s =========================
+```
+
+What each group asserts:
+
+| Tests | Guards against |
+|---|---|
+| `test_probe_outer_gate_does_not_check_rank`, `test_gathered_parameters_call_is_not_rank_gated`, `test_checksum_read_is_still_rank_gated` | Re-introducing the rank-asymmetric `GatheredParameters` deadlock in the weight-freshness probe |
+| `test_stage3_overlap_comm_false_is_written_explicitly`, `test_stage3_overlap_comm_true_still_sets_contiguous_gradients`, `test_stage2_overlap_comm_false_does_not_force_a_key` | Omitting `overlap_comm` at stage 3 again, which lets DeepSpeed silently resolve it to `True` |
+| `test_plain_adamw_is_not_capable`, `test_real_fused_adam_class_is_capable`, `test_missing_inner_optimizer_is_not_capable` | Regressing the FusedAdam capability check that keeps `--ds.enable_sleep` working without `icpx` |
 
 ---
 

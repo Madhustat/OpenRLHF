@@ -31,7 +31,7 @@ Run with no hardware required (CPU-only), no Ray cluster, no model download.
 
 ```bash
 python -m pytest tests/ -q
-# Expected: 86 passed
+# Expected: 99 passed
 ```
 
 ### Environment setup
@@ -167,6 +167,28 @@ device. Spawns real subprocesses to verify two ranks can exchange tensors.
 
 ---
 
+### `test_ppo_zero3_fixes_suite.py` — 9 tests
+
+Regression tests for the three ZeRO-3 / DeepSpeed-sleep fixes on this branch. Full
+background in
+[../docs/xpu_experimental/ZERO3_DEEPSPEED_SLEEP_FIXES.md](../docs/xpu_experimental/ZERO3_DEEPSPEED_SLEEP_FIXES.md).
+Needs no GPU/XPU, no Ray, and no DeepSpeed accelerator runtime — the fixes changed
+config-building logic and source shape, which is what these assert.
+
+| Test | What it checks |
+|---|---|
+| `test_probe_outer_gate_does_not_check_rank` | The weight-probe block is not gated on `rank == 0`, which would re-desync ZeRO-3 collectives |
+| `test_gathered_parameters_call_is_not_rank_gated` | No `GatheredParameters` call inside the probe sits under a rank-gated `if` |
+| `test_checksum_read_is_still_rank_gated` | The fix did not overcorrect — only rank 0 computes/logs the checksum |
+| `test_stage3_overlap_comm_false_is_written_explicitly` | `overlap_comm=False` is *written* at stage 3, not omitted (omitting lets DeepSpeed silently use `True`) |
+| `test_stage3_overlap_comm_true_still_sets_contiguous_gradients` | The pre-existing `overlap_comm=True` branch is unchanged |
+| `test_stage2_overlap_comm_false_does_not_force_a_key` | The fix stays scoped to stage 3; stages 1/2 keep omit-if-false |
+| `test_plain_adamw_is_not_capable` | Plain `torch.optim.AdamW` is correctly reported as unable to do FusedAdam-only state offload |
+| `test_real_fused_adam_class_is_capable` | A real `FusedAdam` still takes the full-offload path |
+| `test_missing_inner_optimizer_is_not_capable` | A missing inner optimizer degrades safely instead of raising |
+
+---
+
 ## Part 2 — E2E test suites
 
 Two suites are provided depending on available hardware.
@@ -292,7 +314,7 @@ Exit code is `0` if all run tests passed, `1` if any failed.
 batches where all responses score identically (no learning signal). This is
 correct algorithm behaviour, not a failure.
 
-### Validated results (2x Arc Pro B70, torch 2.12.0+xpu)
+### Validated results (2x Arc Pro B70, torch 2.13.0+xpu)
 
 All 28 runnable tests pass. Evidence from logs:
 
