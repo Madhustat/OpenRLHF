@@ -430,8 +430,30 @@ class ActorPPOTrainer(ABC):
 
         # Weight-freshness probe: log actor-side checksums before broadcast.
         # Activated by OPENRLHF_WEIGHT_PROBE=1. Runs inside the worker process.
+        #
+        # Under ZeRO-3, GatheredParameters.__enter__/__exit__ issue a REAL collective
+        # (all_gather_into_tensor) on DeepSpeed's own process group, matched purely by call
+        # order -- not by which parameter is being gathered. Gating the whole probe loop on
+        # `rank == 0` (as this used to do) makes rank 0 issue N extra collective calls that no
+        # other rank issues, permanently shifting rank 0 out of phase with every other rank for
+        # the REST of the process's lifetime. The very next GatheredParameters use (the real
+        # broadcast loop below) then pairs rank 0's call for parameter A with another rank's
+        # call for a different parameter B; the mismatched tensor sizes make the collective
+        # block forever with no error. Reproduced directly: py-spy showed rank 0 stuck in this
+        # probe's GatheredParameters (partition_size=401408) while rank 1 was already three
+        # parameters into the main sync loop, stuck in ITS GatheredParameters
+        # (partition_size=57344) -- classic rank-asymmetric ZeRO-3 collective deadlock. Only
+        # possible when zero_stage==3 (GatheredParameters is a no-op at stage < 3) and
+        # actor world size > 1 (a lone rank can't desync from itself), which is exactly the
+        # class of case this probe hung on 2026-09-08.
+        #
+        # Fix: every rank enters the SAME GatheredParameters call, in the same order (the
+        # selection logic below is deterministic and rank-independent, so all ranks pick the
+        # same parameters in the same order) -- only the checksum read and the log line stay
+        # rank-0-only.
         import os as _os
-        if _os.environ.get("OPENRLHF_WEIGHT_PROBE") == "1" and torch.distributed.get_rank() == 0:
+        if _os.environ.get("OPENRLHF_WEIGHT_PROBE") == "1":
+            _is_probe_rank0 = torch.distributed.get_rank() == 0
             import logging as _log
             _logger = _log.getLogger("weight_freshness")
             _gen = getattr(self, "_probe_gen", 0)
@@ -446,9 +468,11 @@ class ActorPPOTrainer(ABC):
                 if not (_is_f or _is_l or any(_n.endswith(s) for s in _track)):
                     continue
                 with _ds.zero.GatheredParameters([_p], enabled=_zero3):
-                    _chk = f"{_p.detach().float().cpu().sum().item():.6f}"
-                _tag = ("[FIRST]" if _is_f else "") + ("[LAST]" if _is_l else "")
-                _logger.info("ACTOR  gen=%d  %s%s  chk=%s", _gen, _n, _tag, _chk)
+                    if _is_probe_rank0:
+                        _chk = f"{_p.detach().float().cpu().sum().item():.6f}"
+                if _is_probe_rank0:
+                    _tag = ("[FIRST]" if _is_f else "") + ("[LAST]" if _is_l else "")
+                    _logger.info("ACTOR  gen=%d  %s%s  chk=%s", _gen, _n, _tag, _chk)
                 _logged += 1
                 if _logged >= 8:
                     break
