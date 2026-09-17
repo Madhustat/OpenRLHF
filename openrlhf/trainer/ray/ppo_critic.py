@@ -63,6 +63,14 @@ class CriticPPOTrainer(ABC):
         self.aux_loss = self.args.actor.aux_loss_coef > 1e-8
 
     def ppo_train(self):
+        # Deep-check #4: log a critic-param checksum each PPO-train call (opt-in).
+        # First-vs-last change proves the critic optimizes; constant over the freeze
+        # window proves --critic.freezing_steps actually holds the critic fixed.
+        if os.environ.get("OPENRLHF_DEEPCHECK_CRITIC", "0") == "1":
+            with torch.no_grad():
+                ck = sum(p.detach().float().sum().item() for p in list(self.critic.parameters())[:8])
+            print(f"DEEPCHECK-CRITIC-CHECKSUM {ck:.6f}", flush=True)
+
         # replay buffer may be empty at first, we should rebuild at each training
         if self.args.train.dynamic_batch_enable:
             self.replay_buffer.setup_dynamic_batch(self.strategy)

@@ -364,6 +364,10 @@ class DeepspeedStrategy(ABC):
                     "betas": list(adam["betas"]),
                     "eps": adam["eps"],
                     "weight_decay": adam["weight_decay"],
+                    # Opt-in escape hatch: force DeepSpeed to use torch's native AdamW instead
+                    # of its fused XPU op. Without icpx, FusedAdam/CPUAdam cannot be JIT-built.
+                    # Defaults OFF so any working CUDA path stays byte-for-byte unchanged.
+                    **({"torch_adam": True} if os.environ.get("OPENRLHF_DS_TORCH_ADAM", "0") == "1" else {}),
                 },
             }
         scheduler_steps = cfg["scheduler_steps"]

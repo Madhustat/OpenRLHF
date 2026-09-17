@@ -373,9 +373,13 @@ class ActorPPOTrainer(ABC):
         if self.ema_model:
             if self.args.train.dynamic_batch_enable:
                 if self.replay_buffer.dynamic_optimizer_step[step]:
-                    self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")
+                    self.strategy.moving_average(
+                        self.actor, self.ema_model, self.ema_beta, torch.accelerator.current_accelerator().type
+                    )
             else:
-                self.strategy.moving_average(self.actor, self.ema_model, self.ema_beta, "cuda")
+                self.strategy.moving_average(
+                    self.actor, self.ema_model, self.ema_beta, torch.accelerator.current_accelerator().type
+                )
 
         # Per-token losses (0-D tensors, shape carries weighting info for ppo_train)
         metrics = {"policy_loss": actor_loss.detach()}

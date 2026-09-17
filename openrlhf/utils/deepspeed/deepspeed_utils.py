@@ -40,6 +40,15 @@ def get_train_ds_config(
     if overlap_comm:
         zero_opt_dict["overlap_comm"] = True
         zero_opt_dict["contiguous_gradients"] = True
+    elif stage == 3:
+        # DeepSpeed's own ZeRO config resolves overlap_comm=None to
+        # `self.stage == ZeroStageEnum.weights` (True for stage 3) whenever the key is absent --
+        # so omitting it here to mean "False" silently becomes "True" for stage 3, the opposite
+        # of this function's own overlap_comm=False default. Causes a native SIGSEGV in oneCCL's
+        # progress thread on Intel XPU under ATL/OFI. Must be written explicitly.
+        # CONFIRMED RANK-COUNT-INDEPENDENT: crashes with a single actor (world_size=1) too, so
+        # this is NOT a multi-GPU-only concern.
+        zero_opt_dict["overlap_comm"] = False
     if stage == 3:
         zero_opt_dict["reduce_scatter"] = True
 
@@ -148,6 +157,17 @@ def _z3_params_to_fetch(param_list):
     return [p for p in param_list if hasattr(p, "ds_id") and p.ds_status == ZeroParamStatus.NOT_AVAILABLE]
 
 
+def _optimizer_supports_state_offload(model):
+    """stage3.py's offload_states() hard-asserts
+    `self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam` before touching either
+    OffloadStateTypeEnum.optim_states or .hp_params. The other three categories (lp_params,
+    lp_grads, contiguous_grad_buffer) never reference self.optimizer at all -- they only move
+    DeepSpeed's own ZeRO-3 partition buffers -- so they work with any optimizer.
+    """
+    inner_optimizer = getattr(model.optimizer, "optimizer", None)
+    return inner_optimizer is not None and inner_optimizer.__class__ is deepspeed.ops.adam.fused_adam.FusedAdam
+
+
 def offload_deepspeed_states(model, pin_memory=True, non_blocking=True):
     zero_stage = model.zero_optimization_stage()  # config['zero_optimization']['stage']
     adam_offload = model.config["zero_optimization"]["offload_optimizer"]["device"] == "cpu"
@@ -164,11 +184,26 @@ def offload_deepspeed_states(model, pin_memory=True, non_blocking=True):
     # if zero_stage == 3 and not adam_offload:
     from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 
+    fused_adam_capable = _optimizer_supports_state_offload(model)
+
     offload_state_types = [
-        OffloadStateTypeEnum.optim_states,
         OffloadStateTypeEnum.contiguous_grad_buffer,
-        OffloadStateTypeEnum.hp_params,
     ]
+    if fused_adam_capable:
+        offload_state_types += [
+            OffloadStateTypeEnum.optim_states,
+            OffloadStateTypeEnum.hp_params,
+        ]
+
+    if not fused_adam_capable and not getattr(model, "_openrlhf_partial_sleep_logged", False):
+        inner = getattr(model.optimizer, "optimizer", None)
+        print(
+            f"[deepspeed sleep] partial offload mode: optimizer={type(inner).__name__} does not "
+            f"support FusedAdam-only state offload -- retaining optim_states, hp_params on-device; "
+            f"offloading {[t.name for t in offload_state_types]}",
+            flush=True,
+        )
+        model._openrlhf_partial_sleep_logged = True
 
     if version.parse(deepspeed.__version__) >= version.parse("0.16.5"):
         # These offload types are fixed in https://github.com/deepspeedai/DeepSpeed/pull/7050

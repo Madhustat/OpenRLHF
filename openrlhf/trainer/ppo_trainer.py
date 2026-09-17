@@ -513,6 +513,26 @@ class PPOTrainer(BasePPOTrainer):
             if state_dict:
                 self.prompts_dataloader.load_state_dict(state_dict)
 
+        # Opt-in "eval-on-load": evaluate the freshly-restored checkpoint BEFORE any
+        # training, so the eval metrics reflect the LOADED weights alone (a pure
+        # "load saved model and evaluate" check). Gated by OPENRLHF_EVAL_ON_LOAD=1 so
+        # default training behaviour is unchanged.
+        if (
+            is_resuming
+            and self.eval_dataloader
+            and os.environ.get("OPENRLHF_EVAL_ON_LOAD", "0") == "1"
+        ):
+            eval_generate_kwargs = self.generate_kwargs.copy()
+            eval_generate_kwargs["temperature"] = self.args.eval.temperature
+            eval_generate_kwargs["n_samples_per_prompt"] = self.args.eval.n_samples_per_prompt
+            logger.info(f"✨ Eval-on-load: evaluating restored checkpoint at global_step {global_step}")
+            self.evaluate(global_step, **eval_generate_kwargs)
+            # eval-on-load is a pure "load saved model and evaluate" path: stop here,
+            # do NOT enter the training loop (which would draw from an exhausted
+            # dataloader and raise StopIteration when resuming at the final step).
+            logger.info("✨ Eval-on-load complete — skipping training (load-and-evaluate only).")
+            return
+
         for episode in range(start_episode, self.args.train.num_episodes):
             dataset_length = len(self.prompts_dataloader)
             pbar = tqdm(
@@ -543,6 +563,19 @@ class PPOTrainer(BasePPOTrainer):
                     status["dynamic_filtering_pass_rate"] = filter_pass_rate
                 log_status = {k: v for k, v in status.items() if k not in ["generated_samples"]}
                 logger.info(f"✨ Global step {global_step}: {log_status}")
+
+                # Deep-check #5: full-run finite scan (opt-in). Every numeric status
+                # value (loss / reward / advantage / kl / grad_norm / lengths) must be
+                # finite — XPU dtype/kernel bugs first surface as NaN/Inf.
+                if os.environ.get("OPENRLHF_DEEPCHECK_FINITE", "0") == "1":
+                    import math as _math
+                    bad = [
+                        k for k, v in log_status.items()
+                        if isinstance(v, (int, float)) and not _math.isfinite(v)
+                    ]
+                    if bad:
+                        raise RuntimeError(f"DEEPCHECK-FINITE-VIOLATION at step {global_step}: {bad}")
+                    logger.info(f"✨ DEEPCHECK-FINITE OK: step {global_step}, all {len(log_status)} metrics finite")
 
                 # logs/checkpoints
                 client_states = {

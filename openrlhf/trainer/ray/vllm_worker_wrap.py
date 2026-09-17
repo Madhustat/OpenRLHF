@@ -53,6 +53,26 @@ class WorkerWrap:
 
         self.model_runner.model.load_weights(weights=[(name, weight)])
 
+        # Deep-check #2 (full path): read the just-loaded param back from the vLLM
+        # model and assert it bit-matches the broadcast value -> proves the
+        # actor->broadcast->vLLM-load path is exact (opt-in). Only params whose
+        # names map 1:1 (unfused) are comparable; fused/sharded names are skipped.
+        import os
+        if os.environ.get("OPENRLHF_DEEPCHECK_SYNC", "0") == "1":
+            params = getattr(self, "_dc_params", None)
+            if params is None:
+                params = {pn: p for pn, p in self.model_runner.model.named_parameters()}
+                self._dc_params, self._dc_checked, self._dc_exact = params, 0, 0
+            p = params.get(name)
+            if p is not None and tuple(p.shape) == tuple(weight.shape):
+                self._dc_checked += 1
+                if torch.equal(p.data.to(weight.dtype), weight):
+                    self._dc_exact += 1
+                else:
+                    print(f"DEEPCHECK-SYNC-MISMATCH name={name}", flush=True)
+                if self._dc_checked <= 3 or self._dc_checked % 100 == 0:
+                    print(f"DEEPCHECK-SYNC checked={self._dc_checked} exact={self._dc_exact}", flush=True)
+
         del weight
         # TODO: should we empty cache if all weights have updated?
         # if empty_cache:
