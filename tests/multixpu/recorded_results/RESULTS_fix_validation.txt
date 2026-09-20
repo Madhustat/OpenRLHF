@@ -1,0 +1,23 @@
+=== 03:13:24 running mg_is_tv_gating
+    PASS  mg_is_tv_gating — IS correction gated by total-variation divergence (steps=5)
+=== 03:18:08 running mg_ds_autotp2
+    PASS  mg_ds_autotp2 — DeepSpeed AutoTP across both XPUs (ds.tensor_parallel_size 2) (steps=5)
+=== 03:23:00 running mg_ring_attn2
+    FAIL  mg_ring_attn2 — Ring/sequence attention across 2 ranks (ring_attn_size 2) (rc=1, steps=0) 
+=== 03:25:45 running mg_moe_experts_batched_mm
+    FAIL  mg_moe_experts_batched_mm — MoE experts_implementation = batched_mm (reduced batch) (rc=1, loss_lines=0) 
+=== 03:26:22 running mg_sft_pretrain_mode
+    PASS  mg_sft_pretrain_mode — SFT pretrain mode (plain LM loss, flat text column) (loss_lines=80)
+=== 03:27:26 running mg_data_chat_template
+    FAIL  mg_data_chat_template — Custom tokenizer chat template (model's own, passed explicitly) (rc=1, loss_lines=0) | ValueError: Training must contain at least one complete gradient-accumulation window and num_update_steps_per_epoch must
+=== 03:28:03 running mg_liger
+    SKIP  mg_liger — liger_kernel not installed (optional dependency)
+=== 03:28:07 running mg_sync_with_ray
+    FAIL  mg_sync_with_ray — Weight sync through Ray instead of the process group (rc=1, steps=0) | RuntimeError: The collective APIs shall be only used inside a Ray actor or task.
+=== 03:30:52 running mg_sft_4bit
+    PASS  mg_sft_4bit — 4-bit / QLoRA on SFT — isolates quantization from rollout (loss_lines=80)
+=== 03:31:44 running mg_determinism
+    FAIL  mg_determinism — Full determinism: two runs must give identical losses | runA=[-0.012687042987279499 0.0 -0.020610985897951337 -0.01582318127591594 0.0 ] runB=[0.0 -0.00800085178384095 0.018209699363609017 0.0229543019614156 0.0 ]
+
+=== SUMMARY ===
+DONE

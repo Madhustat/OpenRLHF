@@ -6,6 +6,7 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from peft.tuners.lora import LoraLayer
 from transformers import AutoConfig, AutoModel, BitsAndBytesConfig
+from transformers import initialization as init
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
 from openrlhf.utils.logging_utils import init_logger
@@ -192,14 +193,16 @@ def _get_reward_model(base_pretrained_model, base_llm_model, value_head_prefix="
             self.register_buffer("mean", torch.zeros(1), persistent=False)
             self.register_buffer("std", torch.ones(1), persistent=False)
 
-            # load mean/std from config.json
-            if hasattr(config, "mean"):
-                self.mean[0] = config.mean
-                self.std[0] = config.std
-
             # Required by Transformers v5 to register derived model metadata such as
             # all_tied_weights_keys before from_pretrained() finalizes loading.
             self.post_init()
+
+        def _init_weights(self, module):
+            super()._init_weights(module)
+            if module is self:
+                # Loading rematerializes nonpersistent buffers; restore their config values here.
+                init.constant_(self.mean, getattr(self.config, "mean", 0.0))
+                init.constant_(self.std, getattr(self.config, "std", 1.0))
 
         def forward(
             self,
@@ -232,10 +235,10 @@ def _get_reward_model(base_pretrained_model, base_llm_model, value_head_prefix="
 
             if self.packing_samples:
                 values = gather_and_pad_tensor(values, ring_attn_group, ring_attn_pad_len, indices, batch, seqlen)
-            reward = values.gather(dim=1, index=eos_indices).squeeze(1)
+            reward = values.gather(dim=1, index=eos_indices.to(values.device)).squeeze(1)
 
             if not self.training and self.normalize_reward:
-                reward = (reward - self.mean) / self.std
+                reward = (reward - self.mean.to(reward.device)) / self.std.to(reward.device)
 
             return (reward, outputs) if return_output else reward
 
@@ -260,14 +263,16 @@ def _get_critic_model(base_pretrained_model, base_llm_model, value_head_prefix="
             self.register_buffer("mean", torch.zeros(1), persistent=False)
             self.register_buffer("std", torch.ones(1), persistent=False)
 
-            # load mean/std from config.json
-            if hasattr(config, "mean"):
-                self.mean[0] = config.mean
-                self.std[0] = config.std
-
             # Required by Transformers v5 to register derived model metadata such as
             # all_tied_weights_keys before from_pretrained() finalizes loading.
             self.post_init()
+
+        def _init_weights(self, module):
+            super()._init_weights(module)
+            if module is self:
+                # Loading rematerializes nonpersistent buffers; restore their config values here.
+                init.constant_(self.mean, getattr(self.config, "mean", 0.0))
+                init.constant_(self.std, getattr(self.config, "std", 1.0))
 
         def forward(
             self,
@@ -307,7 +312,7 @@ def _get_critic_model(base_pretrained_model, base_llm_model, value_head_prefix="
             values = values[:, :-1]
             # normalize reward
             if self.normalize_reward:
-                values = (values - self.mean) / self.std
+                values = (values - self.mean.to(values.device)) / self.std.to(values.device)
 
             action_values = values[:, -action_mask.shape[1] :] * action_mask.float()
 

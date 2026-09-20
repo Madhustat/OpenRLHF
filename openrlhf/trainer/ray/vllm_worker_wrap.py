@@ -11,6 +11,7 @@ class WorkerWrap:
 
         rank = torch.distributed.get_rank() + rank_offset
         self._model_update_with_ray = use_ray
+        self._sync_backend = backend
         if use_ray:
             import ray.util.collective as collective
 
@@ -23,6 +24,7 @@ class WorkerWrap:
                 rank,
                 world_size,
                 self.device,
+                backend=backend,
             )
         print(
             f"init_process_group: master_address={master_address}, master_port={master_port}, ",
@@ -37,15 +39,37 @@ class WorkerWrap:
             print(f"update weight: {name}, dtype: {dtype}, shape: {shape}")
 
         assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-        weight = torch.empty(shape, dtype=dtype, device="cuda")
+        # self.device identifies both the accelerator type and index (unlike a bare int index).
+        weight = torch.empty(shape, dtype=dtype, device=self.device)
         if self._model_update_with_ray:
             import ray.util.collective as collective
 
             collective.broadcast(weight, 0, group_name=self._model_update_group)
         else:
-            self._model_update_group.broadcast(weight, src=0, stream=torch.cuda.current_stream())
+            # Preserve the explicit CUDA stream on the NCCL path; the gloo fallback accepts
+            # stream=None and ignores it. Both broadcast into `weight` in place.
+            stream = torch.cuda.current_stream() if self._sync_backend == "nccl" else None
+            self._model_update_group.broadcast(weight, src=0, stream=stream)
 
         self.model_runner.model.load_weights(weights=[(name, weight)])
+
+        # Weight-freshness probe: checksum the weight just loaded into vLLM.
+        import os as _os
+        if _os.environ.get("OPENRLHF_WEIGHT_PROBE") == "1":
+            _track = ("input_layernorm.weight", "self_attn.q_proj.weight", "lm_head.weight")
+            _first = not getattr(self, "_probe_recv_count", False)
+            self._probe_recv_count = getattr(self, "_probe_recv_count", 0) + 1
+            if _first or any(name.endswith(s) for s in _track):
+                import logging as _log
+                _logger = _log.getLogger("weight_freshness")
+                try:
+                    _state = dict(self.model_runner.model.named_parameters())
+                    if name in _state:
+                        _chk = f"{_state[name].detach().float().cpu().sum().item():.6f}"
+                        _gen = getattr(self, "_probe_gen_seen", 0)
+                        _logger.info("vLLM   gen=%d  %s  chk=%s", _gen, name, _chk)
+                except Exception as _e:
+                    pass
 
         del weight
 

@@ -78,8 +78,12 @@ def train(args):
             dataset_split=args.eval.split,
         )
     else:
-        # Used for calculating mean/std for reward normalization
-        eval_data = train_data.select(range(min(args.data.max_samples, int(len(train_data) * 0.01))))
+        # Used for calculating mean/std for reward normalization. int(n * 0.01) rounds
+        # down to 0 for small n (e.g. any train_data under 100 rows, common in smoke
+        # tests), which then makes dataset.map(..., remove_columns=...) drop all
+        # columns on the empty result and crash downstream with "Column 'prompt'
+        # doesn't exist" instead of a clear error. Floor at 1 row.
+        eval_data = train_data.select(range(min(args.data.max_samples, max(1, int(len(train_data) * 0.01)))))
 
     eval_dataset = RewardDataset(
         eval_data,

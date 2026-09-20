@@ -1,0 +1,14 @@
+PASS  up_ppo_gae — upstream train_ppo_ray_hybrid_engine — PPO+critic GAE | steps=5 policy_loss=0.0015138054536247897 critic_loss=0.020374208688735962
+PASS  up_ppo_reward_fn — upstream train_ppo_with_reward_fn — PPO+critic, remote reward fn | steps=5 policy_loss=-0.05411412189162068 critic_loss=0.029450088273733854
+PASS  up_reinforce_baseline — upstream train_reinforce_baseline_hybrid_engine — REINFORCE++ | steps=5 policy_loss=0.00027467562183396864
+PASS  up_dapo — upstream train_dapo_ray_hybrid_engine — DAPO | steps=5 policy_loss=0.0628728239325202
+PASS  up_prorlv2 — upstream train_prorlv2_math_hybrid_engine — ProRL-v2 | steps=5 policy_loss=-0.00023720228200987842
+PASS  up_agent_async — upstream train_reinforce_baseline_ray_agent_async — async + agent | steps=5 policy_loss=-0.0002257785222719691
+PASS  up_vlm — upstream train_vlm_math_hybrid_engine — VLM RL (scope discovery) | steps=3 policy_loss=0.0
+PASS  up_sft — upstream train_sft — SFT full fine-tune (ZeRO-2) | loss_lines=80 loss=0.62
+PASS  up_sft_lora — upstream train_sft_mixtral_lora — SFT + LoRA | loss_lines=80 loss=0.95
+PASS  up_rm — upstream train_rm — Reward Model (ZeRO-3) | loss_lines=259 loss=0.59
+PASS  up_dpo — upstream train_dpo_llama — DPO beta=0.1 (ZeRO-3) | loss_lines=225 loss=0.716
+PASS  up_flash_reinforce — upstream train_flash_reinforce_ray_agent_async — FlashREINFORCE | steps=5 policy_loss=0.0
+PASS  up_serve_rm — upstream serve_remote_rm — reward-model HTTP server | reward=2.4375
+PASS  up_ckpt_universal — upstream ckpt_ds_zero_to_universal — ZeRO to universal | ckpt_dirs=2 converted=2

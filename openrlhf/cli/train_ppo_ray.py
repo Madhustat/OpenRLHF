@@ -21,12 +21,17 @@ def train(args):
     if not ray.is_initialized():
         # Use os.environ.get() to respect user-set values (e.g. NCCL_DEBUG=INFO via
         # ray job submit --runtime-env-json), falling back to sensible defaults.
+        # NCCL_DEBUG and CCL_LOG_LEVEL are separate env vars read by separate libraries
+        # (NCCL for CUDA, oneCCL for XCCL/XPU) - each is set unconditionally so the right
+        # one applies regardless of which accelerator a given Ray worker ends up on.
         ray.init(
             runtime_env={
                 "env_vars": {
                     "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM", "true"),
                     "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
+                    "CCL_LOG_LEVEL": os.environ.get("CCL_LOG_LEVEL", "warn"),
                     "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
+                    "OPENRLHF_WEIGHT_PROBE": os.environ.get("OPENRLHF_WEIGHT_PROBE", "0"),
                 }
             }
         )
@@ -237,7 +242,16 @@ if __name__ == "__main__":
         default=1,
         help="tensor parallel size of vLLM Engine for multi-GPU inference",
     )
-    parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="DeepSpeed -> vLLM weight sync backend")
+    parser.add_argument(
+        "--vllm.sync_backend",
+        choices=("nccl", "gloo"),
+        default=None,
+        help=(
+            "DeepSpeed -> vLLM weight-sync backend. Omitted/None: auto-detect - "
+            "NCCL/RCCL on CUDA/ROCm, gloo elsewhere (incl. Intel XPU). "
+            "'nccl': CUDA/ROCm only. 'gloo': CPU-staged, works on any accelerator."
+        ),
+    )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
     parser.add_argument("--vllm.enable_prefix_caching", action="store_true", default=False)
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")

@@ -1,0 +1,39 @@
+[04:28:19] === running 12 gap cases ===
+[04:28:19] START rloo_nocolo — RLOO leave-one-out advantage
+[04:35:16]   PASS  rloo_nocolo — RLOO — leave-one-out baseline, lower variance than REINFORCE++ (10 steps)
+[04:35:16] START dr_grpo_nocolo — Dr. GRPO (no std-dev normalization)
+[04:42:24]   PASS  dr_grpo_nocolo — DR-GRPO — GRPO without std-deviation normalisation (bias correction) (10 steps)
+[04:42:24] START grpo_ema — EMA moving-average of policy weights
+[04:49:21]   PASS  grpo_ema — GRPO + EMA checkpoint — exponential moving average of policy weights (10 steps)
+[04:49:21] START grpo_overlong_penalty — Overlong reward penalty
+[04:56:15]   PASS  grpo_overlong_penalty — GRPO + overlong penalty — cosine penalty past soft token limit (buffer_len=50) (10 steps)
+[04:56:15] START grpo_reward_norm — Reward normalization path
+[05:03:24]   PASS  grpo_reward_norm — GRPO + reward normalisation — standardises reward distribution across the batch (10 steps)
+[05:03:24] START ppo_ref_model_nocolo — colocate_actor_ref (partial colocation)
+[05:10:33]   PASS  ppo_ref_model_nocolo — GRPO + reference model KL (colocate_actor_ref) — exercises reference forward path (10 steps)
+[05:10:33] START dpo_ipo — DPO IPO loss variant
+[05:11:33]   PASS  dpo_ipo — IPO — avoids DPO overoptimisation by regressing to log-ratio targets (loss_lines=113)
+[05:11:33] START dpo_cdpo — DPO cDPO label smoothing
+[05:12:40]   PASS  dpo_cdpo — cDPO — label smoothing prevents overfitting to noisy preference labels (loss_lines=113)
+[05:12:40] START mg_determinism_sft — Determinism on SFT (localises the RL determinism finding)
+[05:14:39]   PASS  mg_determinism_sft — Full determinism on SFT (no vLLM, no sampling) - isolates compute from rollout (losses match: loss=0.987 loss=1.08 loss=1.12 loss=1.19 loss=1.19 loss=0.893 loss=0.968 loss=0.974 )
+[05:14:39] START mg_moe_aux_loss — MoE router aux loss, re-pointed at tiny Qwen2Moe
+[05:15:21]   PASS  mg_moe_aux_loss — MoE router balancing aux loss (tiny MoE: granite's impl is broken) (loss_lines=80)
+[05:15:21] START mg_moe_experts_batched_mm — MoE batched_mm, re-pointed at tiny MoE
+[05:16:03]   PASS  mg_moe_experts_batched_mm — MoE experts_implementation = batched_mm (tiny MoE) (loss_lines=144)
+[05:16:03] START mg_data_chat_template — Custom chat template with more samples
+[05:16:40]   FAIL  mg_data_chat_template — Custom tokenizer chat template (model's own, passed explicitly) (rc=1, loss_lines=0) | ValueError: Training must contain at least one complete gradient-accumulation window and num_update_steps_per_epoch must
+[05:16:40] === SUMMARY ===
+ PASS  rloo_nocolo — RLOO — leave-one-out baseline, lower variance than REINFORCE++ (10 steps)
+ PASS  dr_grpo_nocolo — DR-GRPO — GRPO without std-deviation normalisation (bias correction) (10 steps)
+ PASS  grpo_ema — GRPO + EMA checkpoint — exponential moving average of policy weights (10 steps)
+ PASS  grpo_overlong_penalty — GRPO + overlong penalty — cosine penalty past soft token limit (buffer_len=50) (10 steps)
+ PASS  grpo_reward_norm — GRPO + reward normalisation — standardises reward distribution across the batch (10 steps)
+ PASS  ppo_ref_model_nocolo — GRPO + reference model KL (colocate_actor_ref) — exercises reference forward path (10 steps)
+ PASS  dpo_ipo — IPO — avoids DPO overoptimisation by regressing to log-ratio targets (loss_lines=113)
+ PASS  dpo_cdpo — cDPO — label smoothing prevents overfitting to noisy preference labels (loss_lines=113)
+ PASS  mg_determinism_sft — Full determinism on SFT (no vLLM, no sampling) - isolates compute from rollout (losses match: loss=0.987 loss=1.08 loss=1.12 loss=1.19 loss=1.19 loss=0.893 loss=0.968 loss=0.974 )
+ PASS  mg_moe_aux_loss — MoE router balancing aux loss (tiny MoE: granite's impl is broken) (loss_lines=80)
+ PASS  mg_moe_experts_batched_mm — MoE experts_implementation = batched_mm (tiny MoE) (loss_lines=144)
+ FAIL  mg_data_chat_template — Custom tokenizer chat template (model's own, passed explicitly) (rc=1, loss_lines=0) | ValueError: Training must contain at least one complete gradient-accumulation window and num_update_steps_per_epoch must
+[05:16:40] DONE

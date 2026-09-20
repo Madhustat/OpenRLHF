@@ -149,6 +149,16 @@ class TestRayEnvVarsDefaults:
             env_vars = _get_ray_init_env_vars()
         assert env_vars["RAY_ENABLE_ZERO_COPY_TORCH_TENSORS"] == "1"
 
+    def test_ccl_log_level_default(self):
+        """Use a warning-level default for oneCCL/XCCL logging.
+        CCL_LOG_LEVEL is independent of NCCL_DEBUG, which configures only
+        NVIDIA NCCL logging. oneCCL log-level values use lowercase names
+        such as "warn", "info", and "debug"."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CCL_LOG_LEVEL", None)
+            env_vars = _get_ray_init_env_vars()
+        assert env_vars["CCL_LOG_LEVEL"] == "warn"
+
 
 # ---------------------------------------------------------------------------
 # Tests: user overrides
@@ -165,6 +175,10 @@ class TestRayEnvVarsUserOverride:
     def test_nccl_debug_user_trace(self):
         env_vars = _get_ray_init_env_vars({"NCCL_DEBUG": "TRACE"})
         assert env_vars["NCCL_DEBUG"] == "TRACE"
+
+    def test_ccl_log_level_user_debug(self):
+        env_vars = _get_ray_init_env_vars({"CCL_LOG_LEVEL": "debug"})
+        assert env_vars["CCL_LOG_LEVEL"] == "debug"
 
     def test_tokenizers_parallelism_user_false(self):
         env_vars = _get_ray_init_env_vars({"TOKENIZERS_PARALLELISM": "false"})
