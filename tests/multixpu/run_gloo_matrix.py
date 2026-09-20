@@ -65,7 +65,11 @@ from pathlib import Path
 # lives in this suite's data/ dir rather than in the worktree's tests/data/.
 # Override with GLOO_MATRIX_REPO to test a different tree (e.g. the latest-upstream
 # tree /home/sdp/madhu/OpenRLHF-fresh). Default is unchanged.
-REPO = Path(os.environ.get("GLOO_MATRIX_REPO", "/home/sdp/madhu/wt-exp-multi-gloo"))
+# Default to the checkout this script lives in (tests/multixpu/ -> repo root), so a fresh
+# clone reproduces against ITSELF. The old absolute default silently tested another tree
+# that was 40 commits behind, and still reported PASS.
+REPO = Path(os.environ.get("GLOO_MATRIX_REPO",
+                           str(Path(__file__).resolve().parents[2])))
 SUITE_DIR = Path(__file__).resolve().parent
 PYSITE = SUITE_DIR / "pysite"   # holds only sitecustomize.py (probe logger enablement)
 

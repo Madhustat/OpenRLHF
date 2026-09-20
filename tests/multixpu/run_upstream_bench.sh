@@ -82,7 +82,10 @@ set -uo pipefail
 # Latest upstream, VERIFIED equal to github OpenRLHF/OpenRLHF main tip dc2a7ad3
 # (2026-09-17), plus our changes. The old pre-merge tree is
 # /home/sdp/madhu/wt-exp-multi-gloo, which is 40 commits behind.
-REPO=${REPO:-/home/sdp/madhu/OpenRLHF-fresh}
+# Default to the checkout this script lives in (tests/multixpu/ -> repo root) so a fresh
+# clone reproduces against ITSELF rather than silently testing another tree.
+SUITE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=${REPO:-$(cd "$SUITE_DIR/../.." && pwd)}
 VENV=${VENV:-/home/sdp/venvs/openrlhf-xccl-auto-detect-213}
 PYTHON=$VENV/bin/python
 RAY=$VENV/bin/ray
@@ -92,7 +95,8 @@ MODEL=${MODEL:-Qwen/Qwen2.5-0.5B}
 # (Ray killed the worker at 119/125 GB -- adam_offload keeps optimizer state in host memory,
 # and a 2B model plus ref plus vLLM does not fit). 256M runs. Override with VLM_MODEL=...
 VLM_MODEL=${VLM_MODEL:-HuggingFaceTB/SmolVLM-256M-Instruct}
-PROMPTS=${PROMPTS:-/home/sdp/madhu/gloo_matrix_suite/data/gsm8k_train_prompts.jsonl}
+# in-repo copy, committed alongside this script
+PROMPTS=${PROMPTS:-$SUITE_DIR/data/gsm8k_train_prompts.jsonl}
 SFT_DATA=${SFT_DATA:-$REPO/tests/data/gsm8k_sft/train.parquet}
 PREF_DATA=${PREF_DATA:-OpenRLHF/preference_dataset_mixture2_and_safe_pku}
 REWARD_FN=$REPO/examples/python/math_reward_func.py
