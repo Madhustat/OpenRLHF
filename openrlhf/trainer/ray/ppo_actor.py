@@ -475,11 +475,21 @@ class ActorPPOTrainer(ABC):
 
         sync_fn = _handle_cuda_ipc if self.use_cuda_ipc else _broadcast_param
 
+        # Tied weights (e.g. Qwen's lm_head.weight IS embed_tokens.weight under
+        # tie_word_embeddings) must be broadcast once, not once per module. The LoRA
+        # path iterates modules individually, so named_parameters()'s built-in
+        # remove_duplicate does not span modules — dedupe by parameter identity here
+        # to match the non-LoRA path's named_parameters(remove_duplicate=True).
+        synced_param_ids = set()
+
         def _broadcast_module(module, prefix, empty_cache_on_last, need_gather):
             named = list(module.named_parameters(prefix=prefix))
             n = len(named)
             for c, (pname, param) in enumerate(named, start=1):
                 do_empty = empty_cache_on_last and c == n
+                if id(param) in synced_param_ids:
+                    continue  # tied/shared weight already broadcast (e.g. lm_head==embed_tokens)
+                synced_param_ids.add(id(param))
                 with _param_gather_ctx(param, need_gather):
                     # QLoRA: after merging a LoRA adapter into a 4-bit base layer, the
                     # weight is a bitsandbytes Params4bit (packed uint8 + quant_state).
