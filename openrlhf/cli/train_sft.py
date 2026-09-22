@@ -1,5 +1,4 @@
 import argparse
-import math
 import os
 from datetime import datetime
 
@@ -95,12 +94,13 @@ def train(args):
             True,
             False,
             eval_dataset.collate_fn,
+            drop_last=False,
             num_workers=args.data.dataloader_num_workers,
         )
 
     # scheduler
-    num_update_steps_per_epoch = len(train_dataset) // args.train.batch_size
-    max_steps = math.ceil(args.train.max_epochs * num_update_steps_per_epoch)
+    num_update_steps_per_epoch = max(1, len(train_dataloader) // strategy.accumulated_gradient)
+    max_steps = len(train_dataloader) * args.train.max_epochs // strategy.accumulated_gradient
 
     cfg = dict(
         optim=args.optim,

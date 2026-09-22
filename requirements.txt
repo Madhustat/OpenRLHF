@@ -2,7 +2,7 @@ accelerate
 aiohttp
 bitsandbytes
 datasets
-deepspeed==0.19.5
+deepspeed==0.19.6
 einops
 flash-attn==2.8.3
 grpcio>=1.74.0
