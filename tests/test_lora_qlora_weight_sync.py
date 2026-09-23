@@ -30,6 +30,18 @@ class _TinyActor(torch.nn.Module):
         return self.proj(inputs)
 
 
+class _TinyTiedActor(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(8, 4)
+        self.proj = torch.nn.Linear(4, 4, bias=False)
+        self.lm_head = torch.nn.Linear(4, 8, bias=False)
+        self.lm_head.weight = self.embed_tokens.weight
+
+    def forward(self, token_ids):
+        return self.lm_head(self.proj(self.embed_tokens(token_ids)))
+
+
 class _RecordingProcessGroup:
     def __init__(self, engine):
         self.engine = engine
@@ -97,6 +109,31 @@ def _make_qlora_model():
     return model
 
 
+def _make_multilayer_qlora_model():
+    bitsandbytes = pytest.importorskip("bitsandbytes")
+    torch.manual_seed(11)
+    model = torch.nn.Module()
+    model.is_loaded_in_4bit = True
+    model.proj_in = bitsandbytes.nn.Linear4bit(
+        64,
+        64,
+        bias=False,
+        compute_dtype=torch.bfloat16,
+        quant_type="nf4",
+    ).cuda()
+    model.proj_out = bitsandbytes.nn.Linear4bit(
+        64,
+        64,
+        bias=False,
+        compute_dtype=torch.bfloat16,
+        quant_type="nf4",
+    ).cuda()
+    return peft.get_peft_model(
+        model,
+        peft.LoraConfig(r=2, lora_alpha=4, target_modules=["proj_in", "proj_out"], bias="none"),
+    )
+
+
 def test_lora_sync_sends_exact_effective_weight_and_restores_adapter(sync_runtime):
     model = peft.get_peft_model(
         _TinyActor(),
@@ -121,6 +158,35 @@ def test_lora_sync_sends_exact_effective_weight_and_restores_adapter(sync_runtim
     torch.testing.assert_close(layer.base_layer.weight, base_weight, rtol=tolerance, atol=tolerance)
 
 
+def test_full_parameter_sync_is_unchanged(sync_runtime):
+    model = torch.nn.Sequential(
+        torch.nn.Linear(4, 4, bias=False),
+        torch.nn.Linear(4, 3, bias=False),
+    )
+    expected = {name: param.detach().clone() for name, param in model.named_parameters()}
+    trainer, engine = _make_trainer(model)
+
+    trainer.broadcast_to_vllm()
+
+    assert set(engine.received) == set(expected)
+    for name, weight in expected.items():
+        torch.testing.assert_close(engine.received[name], weight, rtol=0, atol=0)
+
+
+def test_lora_sync_sends_tied_weight_once(sync_runtime):
+    model = peft.get_peft_model(
+        _TinyTiedActor(),
+        peft.LoraConfig(r=2, lora_alpha=4, target_modules=["proj"], bias="none"),
+    )
+    trainer, engine = _make_trainer(model)
+
+    trainer.broadcast_to_vllm()
+
+    names = [call.args[0] for call in engine.update_weight.remote.call_args_list]
+    assert names.count("embed_tokens.weight") + names.count("lm_head.weight") == 1
+    assert set(engine.received) == {"embed_tokens.weight", "proj.weight"}
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="bitsandbytes 4-bit quantization requires CUDA")
 def test_qlora_sync_sends_exact_materialized_bf16_weight_and_restores_adapter(sync_runtime):
     from bitsandbytes.functional import dequantize_4bit
@@ -143,3 +209,15 @@ def test_qlora_sync_sends_exact_materialized_bf16_weight_and_restores_adapter(sy
     assert engine.received["proj.weight"].dtype == torch.bfloat16
     torch.testing.assert_close(engine.received["proj.weight"], expected, rtol=0, atol=0)
     assert not layer.merged
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="bitsandbytes 4-bit quantization requires CUDA")
+def test_qlora_sync_does_not_skip_temporary_merged_parameters(sync_runtime):
+    model = _make_multilayer_qlora_model()
+    trainer, engine = _make_trainer(model)
+
+    trainer.broadcast_to_vllm()
+
+    assert set(engine.received) == {"proj_in.weight", "proj_out.weight"}
+    assert not model.base_model.model.proj_in.merged
+    assert not model.base_model.model.proj_out.merged

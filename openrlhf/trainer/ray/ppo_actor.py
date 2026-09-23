@@ -482,14 +482,16 @@ class ActorPPOTrainer(ABC):
         # to match the non-LoRA path's named_parameters(remove_duplicate=True).
         synced_param_ids = set()
 
-        def _broadcast_module(module, prefix, empty_cache_on_last, need_gather):
+        def _broadcast_module(module, prefix, empty_cache_on_last, need_gather, stable_param_ids=None):
             named = list(module.named_parameters(prefix=prefix))
             n = len(named)
             for c, (pname, param) in enumerate(named, start=1):
                 do_empty = empty_cache_on_last and c == n
-                if id(param) in synced_param_ids:
+                local_name = pname.removeprefix(f"{prefix}.")
+                param_id = stable_param_ids.get(local_name, id(param)) if stable_param_ids else id(param)
+                if param_id in synced_param_ids:
                     continue  # tied/shared weight already broadcast (e.g. lm_head==embed_tokens)
-                synced_param_ids.add(id(param))
+                synced_param_ids.add(param_id)
                 with _param_gather_ctx(param, need_gather):
                     # QLoRA: after merging a LoRA adapter into a 4-bit base layer, the
                     # weight is a bitsandbytes Params4bit (packed uint8 + quant_state).
@@ -524,16 +526,24 @@ class ActorPPOTrainer(ABC):
                     if hasattr(module, "base_layer"):
                         # LoRA module: gather (if ZeRO-3), merge adapter into base layer,
                         # broadcast the merged base layer, then unmerge on exit.
+                        base_layer = module.get_base_layer()
+                        stable_param_ids = {name: id(param) for name, param in base_layer.named_parameters()}
                         stack.enter_context(
                             deepspeed.zero.GatheredParameters(list(module.parameters()), enabled=need_gather)
                         )
                         module.merge(safe_merge=True)
                         fake_parent = type("FakeParent", (), {})()
-                        lora_model._replace_module(fake_parent, module_name, module.get_base_layer(), module)
+                        lora_model._replace_module(fake_parent, module_name, base_layer, module)
                         merged = getattr(fake_parent, module_name)
                         stack.callback(module.unmerge)
                         # Params already gathered/merged in full -> no further gather.
-                        _broadcast_module(merged, prefix=key, empty_cache_on_last=empty_cache_on_last, need_gather=False)
+                        _broadcast_module(
+                            merged,
+                            prefix=key,
+                            empty_cache_on_last=empty_cache_on_last,
+                            need_gather=False,
+                            stable_param_ids=stable_param_ids,
+                        )
                     else:
                         _broadcast_module(
                             module, prefix=key, empty_cache_on_last=empty_cache_on_last, need_gather=need_gather
