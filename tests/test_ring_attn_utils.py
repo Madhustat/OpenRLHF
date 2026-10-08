@@ -26,6 +26,7 @@ spawned processes, device-generic backend selection, single-device fallback when
 accelerator is visible.
 """
 
+import importlib.util
 import os
 import queue
 import socket
@@ -41,6 +42,14 @@ from openrlhf.models.ring_attn_utils import (
     gather_and_pad_tensor,
     index_first_axis,
     unpad_and_slice_tensor,
+)
+
+# The fallback in ring_attn_utils is used only when flash_attn is absent. With flash_attn
+# installed (the CUDA path), the module exports flash_attn's own functions, so tests of the
+# fallback do not apply there.
+fallback_only = pytest.mark.skipif(
+    importlib.util.find_spec("flash_attn") is not None,
+    reason="flash_attn is installed; these tests cover the fallback used without it",
 )
 
 
@@ -85,6 +94,7 @@ def _find_free_port() -> int:
 # ---------------------------------------------------------------------------
 # Test 1 - index_first_axis preserves trailing dimensions (the exact failure shape)
 # ---------------------------------------------------------------------------
+@fallback_only
 def test_index_first_axis_preserves_trailing_dimensions():
     """flash_attn's index_first_axis keeps trailing dims; the transformers alias did not.
 
@@ -109,6 +119,7 @@ def test_index_first_axis_preserves_trailing_dimensions():
 # ---------------------------------------------------------------------------
 # Test 2 - gradient flows back to the selected rows
 # ---------------------------------------------------------------------------
+@fallback_only
 def test_index_first_axis_gradient_flows_to_selected_rows():
     """The gather is autograd-aware: unselected rows get zero grad, selected rows get one.
 
@@ -127,6 +138,7 @@ def test_index_first_axis_gradient_flows_to_selected_rows():
 # ---------------------------------------------------------------------------
 # Test 3 - exact --packing_samples regression through the real OpenRLHF function
 # ---------------------------------------------------------------------------
+@fallback_only
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_packing_path_regression(dtype):
     """Drive the exact code path that failed during GRPO --packing_samples training.
@@ -168,15 +180,13 @@ def test_packing_path_regression(dtype):
 # ---------------------------------------------------------------------------
 # Test 4 - fallback wiring is what we expect when flash_attn is absent
 # ---------------------------------------------------------------------------
+@fallback_only
 def test_fallback_symbols_are_wired_when_flash_attn_absent():
     """When flash_attn is not installed, the module must expose working helpers.
 
     Skipped when flash_attn IS installed (the NVIDIA path), since then these symbols come
     from flash_attn and this fallback-specific wiring does not apply.
     """
-    if _flash_attn_installed():
-        pytest.skip("flash_attn is installed; fallback wiring does not apply on this box")
-
     # padding helpers resolve to transformers' private implementations
     import transformers.modeling_flash_attention_utils as tfa
 
@@ -208,19 +218,12 @@ def test_guard_falls_back_only_for_top_level_package():
     assert guard("some_unrelated_dep") == "raise"
 
 
-def _flash_attn_installed() -> bool:
-    import importlib.util
-
-    return importlib.util.find_spec("flash_attn") is not None
-
-
 # ---------------------------------------------------------------------------
 # Test 6 - world-size-one all_gather forward + backward
 # ---------------------------------------------------------------------------
+@fallback_only
 def test_all_gather_requires_initialized_process_group():
     """The vendored all_gather guards against an uninitialized process group."""
-    if _flash_attn_installed():
-        pytest.skip("flash_attn is installed; vendored all_gather is not in use")
     if dist.is_initialized():
         pytest.skip("a process group is already initialized in this interpreter")
 
@@ -293,6 +296,7 @@ def _all_gather_worker(rank, device, backend, master_port, result_queue):
 
 
 @pytest.mark.integration
+@fallback_only
 def test_two_rank_all_gather_forward_and_backward():
     """Real cross-process all_gather: forward gathers both ranks, backward reduce-scatters.
 
@@ -300,8 +304,6 @@ def test_two_rank_all_gather_forward_and_backward():
     canonical backend when available, else CPU/Gloo. Skips entirely when flash_attn is
     installed (the vendored fallback is not the code under test there).
     """
-    if _flash_attn_installed():
-        pytest.skip("flash_attn is installed; vendored all_gather is not in use")
 
     # Prefer the accelerator; fall back to CPU/Gloo so the test still runs on CPU-only boxes.
     accel = _accelerator_device_and_backend()
