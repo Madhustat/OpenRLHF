@@ -68,6 +68,7 @@ def _make_trainer(model):
     trainer.vllm_engines = [engine]
     trainer._model_update_group = _RecordingProcessGroup(engine)
     trainer.use_cuda_ipc = False
+    trainer.vllm_sync_backend = "gloo"
     return trainer, engine
 
 
@@ -78,12 +79,13 @@ def sync_runtime(monkeypatch):
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: None)
     monkeypatch.setattr(ppo_actor.deepspeed.zero, "GatheredParameters", lambda *args, **kwargs: nullcontext())
-    monkeypatch.setattr(ppo_actor, "torch_dist_barrier_and_cuda_sync", lambda: None)
+    monkeypatch.setattr(ppo_actor, "torch_dist_barrier_and_accelerator_sync", lambda: None)
     monkeypatch.setattr(ppo_actor.ray, "get", lambda refs: refs)
 
 
 def _make_qlora_model():
     bitsandbytes = pytest.importorskip("bitsandbytes")
+    device = torch.accelerator.current_accelerator()
     torch.manual_seed(7)
     model = torch.nn.Module()
     model.is_loaded_in_4bit = True
@@ -93,7 +95,7 @@ def _make_qlora_model():
         bias=False,
         compute_dtype=torch.bfloat16,
         quant_type="nf4",
-    ).cuda()
+    ).to(device)
     model = peft.get_peft_model(
         model,
         peft.LoraConfig(r=2, lora_alpha=4, target_modules=["proj"], bias="none"),
@@ -101,16 +103,17 @@ def _make_qlora_model():
     layer = model.base_model.model.proj
     with torch.no_grad():
         layer.lora_A["default"].weight.copy_(
-            torch.arange(128, device="cuda", dtype=torch.float32).reshape(2, 64) / 1000
+            torch.arange(128, device=device, dtype=torch.float32).reshape(2, 64) / 1000
         )
         layer.lora_B["default"].weight.copy_(
-            torch.arange(128, device="cuda", dtype=torch.float32).reshape(64, 2) / 2000
+            torch.arange(128, device=device, dtype=torch.float32).reshape(64, 2) / 2000
         )
     return model
 
 
 def _make_multilayer_qlora_model():
     bitsandbytes = pytest.importorskip("bitsandbytes")
+    device = torch.accelerator.current_accelerator()
     torch.manual_seed(11)
     model = torch.nn.Module()
     model.is_loaded_in_4bit = True
@@ -120,14 +123,14 @@ def _make_multilayer_qlora_model():
         bias=False,
         compute_dtype=torch.bfloat16,
         quant_type="nf4",
-    ).cuda()
+    ).to(device)
     model.proj_out = bitsandbytes.nn.Linear4bit(
         64,
         64,
         bias=False,
         compute_dtype=torch.bfloat16,
         quant_type="nf4",
-    ).cuda()
+    ).to(device)
     return peft.get_peft_model(
         model,
         peft.LoraConfig(r=2, lora_alpha=4, target_modules=["proj_in", "proj_out"], bias="none"),
@@ -187,7 +190,7 @@ def test_lora_sync_sends_tied_weight_once(sync_runtime):
     assert set(engine.received) == {"embed_tokens.weight", "proj.weight"}
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="bitsandbytes 4-bit quantization requires CUDA")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="bitsandbytes 4-bit quantization requires a GPU")
 def test_qlora_sync_sends_exact_materialized_bf16_weight_and_restores_adapter(sync_runtime):
     from bitsandbytes.functional import dequantize_4bit
 
@@ -211,7 +214,7 @@ def test_qlora_sync_sends_exact_materialized_bf16_weight_and_restores_adapter(sy
     assert not layer.merged
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="bitsandbytes 4-bit quantization requires CUDA")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="bitsandbytes 4-bit quantization requires a GPU")
 def test_qlora_sync_does_not_skip_temporary_merged_parameters(sync_runtime):
     model = _make_multilayer_qlora_model()
     trainer, engine = _make_trainer(model)
