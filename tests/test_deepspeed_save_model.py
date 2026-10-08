@@ -65,7 +65,7 @@ def ds_module(monkeypatch):
     import openrlhf.utils.deepspeed.deepspeed as module
 
     # Single-process test: no real process group to barrier/sync on.
-    monkeypatch.setattr(module, "torch_dist_barrier_and_cuda_sync", lambda: None)
+    monkeypatch.setattr(module, "torch_dist_barrier_and_accelerator_sync", lambda: None)
     return module
 
 
