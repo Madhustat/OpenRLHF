@@ -333,6 +333,7 @@ def _bitsandbytes_xpu_tables():
 def xpu_identity(role, **extra):
     """This process's XPU placement by physical identity (UUID / PCI address), never by xpu:N alone."""
     import os
+    import socket
 
     import torch
 
@@ -341,6 +342,7 @@ def xpu_identity(role, **extra):
     return {
         "role": role,
         "pid": os.getpid(),
+        "host": socket.gethostname(),
         "ZE_AFFINITY_MASK": os.environ.get("ZE_AFFINITY_MASK"),
         "ONEAPI_DEVICE_SELECTOR": os.environ.get("ONEAPI_DEVICE_SELECTOR"),
         "device_count": len(visible),
@@ -360,18 +362,23 @@ def xpu_identity(role, **extra):
 def check_xccl_participants(participants, reference_uuids, colocated=False, xccl=True, reference_pci=None):
     """Raise XcclUnavailableError unless XCCL weight sync is safe for these participants.
 
-    Each participant is an xpu_identity() dict plus "assigned_xpu", its Ray-assigned XPU: an index
-    into ``reference_uuids``, the full XPU enumeration. Checked against the devices this
-    communicator uses, not every XPU in the host. ``xccl=False`` checks placement only (gloo, where
-    vLLM is masked to its own XPU): Ray assignment and memory, not visibility or sharing.
+    Each participant is an xpu_identity() dict plus "assigned_xpu", its Ray-assigned XPU: an index into
+    its host's XPU enumeration. ``reference_uuids`` / ``reference_pci`` are that enumeration on the first
+    participant's (the trainer's) host; a participant on another host is checked against its own list.
+    ``xccl=False`` checks placement only (gloo): Ray assignment and memory, not visibility or sharing.
     """
     errors = []
     for p in participants:
         who = f"{p['role']} (weight-sync rank {p['weight_sync_rank']}, pid {p['pid']})"
         assigned = p["assigned_xpu"]
-        expected = reference_uuids[assigned] if 0 <= assigned < len(reference_uuids) else None
+        uuids, pcis = (
+            (reference_uuids, reference_pci)
+            if p["host"] == participants[0]["host"]
+            else (p["visible_uuids"], p["visible_pci"])
+        )
+        expected = uuids[assigned] if 0 <= assigned < len(uuids) else None
         if p["uuid"] != expected:
-            expected_pci = reference_pci[assigned] if reference_pci and 0 <= assigned < len(reference_pci) else "?"
+            expected_pci = pcis[assigned] if pcis and 0 <= assigned < len(pcis) else "?"
             errors.append(
                 f"{who} selected xpu:{p['current_device']} = {p['uuid']} ({p['pci']}), but Ray assigned XPU "
                 f"{assigned} = {expected} ({expected_pci})"
@@ -400,9 +407,10 @@ def check_xccl_participants(participants, reference_uuids, colocated=False, xccl
             errors.append(
                 f"{who} has memory on XPU(s) {[p['visible_uuids'][i] for i in other]}, not only on its own {p['uuid']}"
             )
-    required = {p["uuid"] for p in participants} if xccl else set()
     for p in participants:
-        missing = required - set(p["visible_uuids"])
+        # oneCCL needs every communicator XPU of the same host visible; XPUs of other hosts are reached over the network
+        same_host = {q["uuid"] for q in participants if q["host"] == p["host"]} if xccl else set()
+        missing = same_host - set(p["visible_uuids"])
         if missing:
             errors.append(
                 f"{p['role']} (weight-sync rank {p['weight_sync_rank']}, pid {p['pid']}) cannot see communicator "
@@ -410,7 +418,7 @@ def check_xccl_participants(participants, reference_uuids, colocated=False, xccl
                 f"ONEAPI_DEVICE_SELECTOR={p['ONEAPI_DEVICE_SELECTOR']}); oneCCL needs every communicator XPU "
                 "visible in every process"
             )
-    if xccl and len(required) < len(participants) and not colocated:
+    if xccl and len({p["uuid"] for p in participants}) < len(participants) and not colocated:
         errors.append("two weight-sync ranks run on the same XPU, but vLLM is not colocated with the trainer")
     if errors:
         raise XcclUnavailableError("XCCL weight-sync placement check failed:\n  " + "\n  ".join(errors))
@@ -447,12 +455,19 @@ class ProcessWatchdog:
         self._timer = None
 
     def __enter__(self):
+        self.restart(self.phase)
+        return self
+
+    def restart(self, phase):
+        """Start the timeout over for ``phase``: restarted per step, each step (not the block) must finish in time."""
         import threading
 
+        if self._timer:
+            self._timer.cancel()
+        self.phase = phase
         self._timer = threading.Timer(self.timeout, self._expire)
         self._timer.daemon = True
         self._timer.start()
-        return self
 
     def __exit__(self, *exc):
         self._timer.cancel()
@@ -505,7 +520,8 @@ def xccl_preflight(group, rank, device, identity="", timeout=120, marker=None):
     results = []
     with ProcessWatchdog(timeout, f"XCCL preflight on rank {rank} [{identity}]", marker=marker) as watchdog:
         for nbytes in (4 << 10, 16 << 20, 128 << 20):
-            expected = (torch.arange(nbytes // 2, device=device) % 251).to(torch.bfloat16)
+            n = nbytes // 2  # bf16 elements; 0..250 repeated, built without int64 temporaries
+            expected = torch.arange(251, dtype=torch.bfloat16, device=device).repeat(n // 251 + 1)[:n]
             tensor = expected.clone() if rank == 0 else torch.full_like(expected, -12345.0)
             watchdog.phase = f"{nbytes} B broadcast"
             group.broadcast(tensor, src=0)

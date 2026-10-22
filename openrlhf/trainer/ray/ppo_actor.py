@@ -191,6 +191,8 @@ class ActorPPOTrainer(ABC):
             per_engine = ray.get(refs, timeout=180)
         except ray.exceptions.GetTimeoutError:
             per_engine = None
+        except torch.OutOfMemoryError:
+            raise  # not an XCCL failure: the job stops with the original error
         except Exception as e:  # a vLLM rank died or raised during its preflight: the group is unusable
             _FAILED_XCCL_GROUPS.append(self._model_update_group)
             raise XcclUnavailableError(f"a vLLM rank failed during the XCCL preflight broadcasts: {e}") from e
@@ -515,7 +517,7 @@ class ActorPPOTrainer(ABC):
         if self.vllm_sync_backend != "xccl":
             return self._broadcast_to_vllm()
         # A hung XCCL weight sync would block forever (ProcessGroupXCCL reports completion early and
-        # its timeout does not fire): bound it, and stop rather than train on stale or partial weights.
+        # its timeout does not fire): bound each tensor's transfer, and stop rather than train on stale weights.
         timeout = getattr(self.strategy.args.vllm, "sync_timeout", 600)
         with ProcessWatchdog(timeout, f"XCCL weight sync to vLLM [{self._xccl_summary}]") as self._sync_watchdog:
             self._broadcast_to_vllm()
@@ -535,7 +537,7 @@ class ActorPPOTrainer(ABC):
 
         def _broadcast_param(param, count, num_params):
             if self._sync_watchdog:
-                self._sync_watchdog.phase = f"vLLM update and broadcast of {name}"
+                self._sync_watchdog.restart(f"vLLM update and broadcast of {name}")
             use_ray = getattr(self.strategy.args.vllm, "sync_with_ray", False)
             # Fire all vllm engines for broadcast
             if torch.distributed.get_rank() == 0:
@@ -606,7 +608,7 @@ class ActorPPOTrainer(ABC):
                 sync_fn(param, count, num_params)
 
         if self._sync_watchdog:
-            self._sync_watchdog.phase = "final synchronize and barrier"
+            self._sync_watchdog.restart("final synchronize and barrier")
         if cache_reset_refs:
             ray.get(cache_reset_refs)
         torch.accelerator.empty_cache()

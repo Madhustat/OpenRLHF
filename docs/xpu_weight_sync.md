@@ -69,8 +69,8 @@ phase.
 
 ProcessGroupXCCL reports broadcasts complete before the device work is done, and its timeout does
 not fire, so a hung XCCL collective would block forever. Every real XCCL weight sync therefore runs
-under a watchdog (`--vllm.sync_timeout`, default 600 s); on timeout it reports the tensor, phase and
-ranks and stops the job.
+under a watchdog (`--vllm.sync_timeout`, default 600 s per tensor); on timeout it reports the tensor,
+phase and ranks and stops the job.
 
 ## Failure behavior
 
@@ -80,7 +80,7 @@ ranks and stops the job.
 | `auto`, placement check or preflight fails during setup, or the setup watchdog ends a hung preflight | every vLLM and training actor is stopped and recreated with gloo (pinned by the same `device_ids`), placement is re-checked, training starts |
 | `auto`, any other actor death during setup (OOM, model load, invalid configuration, crash) | the job stops with the original error; no fallback |
 | explicit `xccl`, any check fails | the job stops with the reason; no fallback |
-| explicit `gloo` | gloo; no XCCL group, no XCCL checks |
+| explicit `gloo` | gloo; no XCCL group or preflight (the placement check still runs) |
 | XCCL fails after training started | the job stops (watchdog); a process that touched XCCL is never reused, and nothing falls back mid-training |
 
 ## Not supported on XPU
