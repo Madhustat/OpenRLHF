@@ -68,6 +68,7 @@ def _make_trainer(model):
     trainer.vllm_engines = [engine]
     trainer._model_update_group = _RecordingProcessGroup(engine)
     trainer.use_cuda_ipc = False
+    trainer.vllm_sync_backend = "gloo"
     return trainer, engine
 
 
@@ -78,7 +79,7 @@ def sync_runtime(monkeypatch):
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: None)
     monkeypatch.setattr(ppo_actor.deepspeed.zero, "GatheredParameters", lambda *args, **kwargs: nullcontext())
-    monkeypatch.setattr(ppo_actor, "torch_dist_barrier_and_cuda_sync", lambda: None)
+    monkeypatch.setattr(ppo_actor, "torch_dist_barrier_and_accelerator_sync", lambda: None)
     monkeypatch.setattr(ppo_actor.ray, "get", lambda refs: refs)
 
 

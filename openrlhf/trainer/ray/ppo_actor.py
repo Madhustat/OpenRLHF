@@ -22,7 +22,16 @@ from openrlhf.utils.deepspeed.deepspeed_utils import (
     offload_deepspeed_states,
     reload_deepspeed_states,
 )
-from openrlhf.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
+from openrlhf.utils.distributed_util import (
+    ProcessWatchdog,
+    XcclUnavailableError,
+    check_xccl_participants,
+    resolve_vllm_sync_backend,
+    stateless_init_process_group,
+    torch_dist_barrier_and_accelerator_sync,
+    xccl_preflight,
+    xpu_identity,
+)
 from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.loss_utils import get_loss_batch_info, iter_grad_accum_global_norm
 from openrlhf.utils.vlm_utils import merge_mm_train_inputs
@@ -31,11 +40,16 @@ from ..ppo_utils import NaiveReplayBuffer
 
 logger = init_logger(__name__)
 
+# Failed XCCL weight-sync groups, kept referenced on purpose: destroying a ProcessGroupXCCL blocks until
+# every rank destroys it, and the vLLM ranks keep theirs. The launcher stops this process instead.
+_FAILED_XCCL_GROUPS = []
+
 from .launcher import BaseModelActor
 from .utils import get_physical_gpu_id
 
 
 class ActorPPOTrainer(ABC):
+    _sync_watchdog = None  # watchdog of the XCCL weight sync in progress
 
     def __init__(
         self,
@@ -97,14 +111,19 @@ class ActorPPOTrainer(ABC):
             self.args.train.dynamic_batch_enable,
         )
 
-        # Init torch group for weights sync
-        backend = getattr(self.strategy.args.vllm, "sync_backend", "nccl")
-        self.use_cuda_ipc = backend == "nccl" and self.args.train.colocate_all and not self.args.train.async_enable
+        # Init torch group for weights sync. Resolve the backend once (auto-detect when unset,
+        # strict on explicit) so downstream decisions - especially CUDA IPC - use the effective
+        # backend, not the raw config value.
+        configured_backend = getattr(self.strategy.args.vllm, "sync_backend", None)
+        colocated = self.args.train.colocate_all and not self.args.train.async_enable
+        self.vllm_sync_backend = resolve_vllm_sync_backend(configured_backend, colocated=colocated)
+        self.use_cuda_ipc = self.vllm_sync_backend == "nccl" and colocated
+        self._xccl_summary = f"DeepSpeed rank {torch.distributed.get_rank()}"
 
         if self.vllm_engines is not None and not self.use_cuda_ipc and torch.distributed.get_rank() == 0:
-            self._init_vllm_sync_group(backend)
+            self._init_vllm_sync_group(self.vllm_sync_backend)
 
-        torch_dist_barrier_and_cuda_sync()
+        torch_dist_barrier_and_accelerator_sync()
 
     def _init_vllm_sync_group(self, backend: str):
         """Create a torch process group between DeepSpeed rank 0 and all vLLM engine ranks.
@@ -126,6 +145,12 @@ class ActorPPOTrainer(ABC):
         world_size = vllm_num_engines * vllm_tensor_parallel_size + 1
 
         use_ray = getattr(self.strategy.args.vllm, "sync_with_ray", False)
+        xccl_checks = backend == "xccl" and not use_ray
+        if xccl_checks:
+            self._check_xpu_placement(vllm_tensor_parallel_size)
+        elif backend == "gloo" and getattr(torch.version, "xpu", None):
+            # gloo on XPU is pinned the same way (device index, all XPUs visible): check the placement too
+            self._check_xpu_placement(vllm_tensor_parallel_size, xccl=False)
         group_name = "openrlhf"
         refs = [
             engine.init_process_group.remote(
@@ -145,11 +170,91 @@ class ActorPPOTrainer(ABC):
             collective.init_collective_group(world_size=world_size, rank=0, backend=backend, group_name=group_name)
             self._model_update_group = group_name
         else:
+            accelerator = torch.accelerator.current_accelerator()
+            device = torch.device(accelerator.type, torch.accelerator.current_device_index())
             self._model_update_group = stateless_init_process_group(
-                master_address, master_port, 0, world_size, torch.cuda.current_device()
+                master_address, master_port, 0, world_size, device, backend=backend
             )
 
-        ray.get(refs)
+        if not xccl_checks:
+            ray.get(refs)
+            return
+        # Real weights go over XCCL only after the test broadcasts arrive bit-exact on every rank.
+        trainer = self._xccl_participants[0]
+        identity = f"trainer rank 0, {device}, {trainer['uuid']}"
+        # If the watchdog ends this process, the launcher reads this marker to fall back to gloo.
+        attempt = getattr(self.strategy.args.vllm, "xccl_attempt", None)
+        marker = dict(
+            attempt=attempt, stage="setup", actor="trainer", rank=0, uuid=trainer["uuid"], pci=trainer["pci"]
+        )
+        results = {"trainer rank 0": xccl_preflight(self._model_update_group, 0, device, identity, marker=marker)}
+        try:
+            per_engine = ray.get(refs, timeout=180)
+        except ray.exceptions.GetTimeoutError:
+            per_engine = None
+        except Exception as e:  # a vLLM rank died or raised during its preflight: the group is unusable
+            _FAILED_XCCL_GROUPS.append(self._model_update_group)
+            raise XcclUnavailableError(f"a vLLM rank failed during the XCCL preflight broadcasts: {e}") from e
+        if per_engine is not None:
+            for i, per_worker in enumerate(per_engine):
+                results.update({f"vLLM engine {i} worker {j}": r for j, r in enumerate(per_worker)})
+        failed = [f for checks in results.values() for f in checks if not f["ok"]]
+        if per_engine is None or failed:
+            _FAILED_XCCL_GROUPS.append(self._model_update_group)
+            if per_engine is None:
+                raise XcclUnavailableError("vLLM ranks did not finish the XCCL preflight broadcasts within 180 s")
+            raise XcclUnavailableError(f"XCCL preflight broadcasts returned wrong data: {failed}")
+        logger.info(f"XCCL weight-sync preflight passed on {len(results)} ranks (4 KiB, 16 MiB, 128 MiB bit-exact)")
+
+    def _check_xpu_placement(self, vllm_tensor_parallel_size, xccl=True):
+        """Before any XCCL traffic: every weight-sync rank must run on its Ray-assigned XPU, keep its
+        memory there and see every communicator XPU. Placement is compared by UUID / PCI address."""
+        trainer = xpu_identity(
+            "trainer",
+            weight_sync_rank=0,
+            ray_gpu_ids=[int(g) for g in ray.get_gpu_ids()],
+            actor_id=ray.get_runtime_context().get_actor_id(),
+        )
+        trainer["assigned_xpu"] = trainer["ray_gpu_ids"][0]
+        participants = [trainer]
+        for i, engine in enumerate(ray.get([e.xpu_identity.remote() for e in self.vllm_engines])):
+            for worker in engine["workers"]:
+                # device_ids lists the worker's XPUs by vLLM local position (its TP rank on one node);
+                # without it (gloo-style masking) the actor's own Ray assignment applies.
+                device_ids = worker["device_ids"] or engine["ray_gpu_ids"]
+                participants.append(
+                    {
+                        **worker,
+                        "actor_id": engine["actor_id"],
+                        "ray_gpu_ids": engine["ray_gpu_ids"],
+                        "weight_sync_rank": i * vllm_tensor_parallel_size + 1 + worker["rank"],
+                        "assigned_xpu": device_ids[worker["tp_rank"]],
+                    }
+                )
+        for p in participants:
+            logger.info(
+                f"XCCL weight-sync rank {p['weight_sync_rank']}: {p['role']} pid {p['pid']} actor {p['actor_id']} "
+                f"Ray XPU {p['ray_gpu_ids']} -> {p['name']} {p['uuid']} ({p['pci']}), visible {p['visible_pci']}, "
+                f"ZE_AFFINITY_MASK={p['ZE_AFFINITY_MASK']} ONEAPI_DEVICE_SELECTOR={p['ONEAPI_DEVICE_SELECTOR']}"
+                + (
+                    f", vLLM local/TP/DP rank {p['local_rank']}/{p['tp_rank']}/{p['dp_rank']}, device_ids {p['device_ids']}, "
+                    f"process groups on {p.get('group_devices')}"
+                    if p["role"] == "vllm"
+                    else ""
+                )
+            )
+        # Ray's XPU IDs are Level Zero enumeration indices; the trainer sees every XPU (checked).
+        check_xccl_participants(
+            participants,
+            trainer["visible_uuids"],
+            colocated=self.args.train.colocate_all and not self.args.train.async_enable,
+            xccl=xccl,
+            reference_pci=trainer["visible_pci"],
+        )
+        self._xccl_participants = participants
+        self._xccl_summary = "; ".join(
+            f"rank {p['weight_sync_rank']} {p['role']} {p['uuid']} ({p['pci']})" for p in participants
+        )
 
     def ppo_train(self, kl_ctl: float):
         # replay buffer may be empty at first, we should rebuild at each training
@@ -412,6 +517,16 @@ class ActorPPOTrainer(ABC):
         }
 
     def broadcast_to_vllm(self):
+        if self.vllm_sync_backend != "xccl":
+            return self._broadcast_to_vllm()
+        # A hung XCCL weight sync would block forever (ProcessGroupXCCL reports completion early and
+        # its timeout does not fire): bound it, and stop rather than train on stale or partial weights.
+        timeout = getattr(self.strategy.args.vllm, "sync_timeout", 600)
+        with ProcessWatchdog(timeout, f"XCCL weight sync to vLLM [{self._xccl_summary}]") as self._sync_watchdog:
+            self._broadcast_to_vllm()
+        self._sync_watchdog = None
+
+    def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args.vllm, "enable_prefix_caching", False)
         cache_reset_refs = []
         if use_prefix_cache and torch.distributed.get_rank() == 0:
@@ -419,12 +534,14 @@ class ActorPPOTrainer(ABC):
             for engine in self.vllm_engines:
                 cache_reset_refs.append(engine.reset_prefix_cache.remote())
 
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         model = self.actor.model.module
         # TP gather always needs the top-level (possibly PeftModel) module.
         tp_model = model
 
         def _broadcast_param(name, param, do_empty):
+            if self._sync_watchdog:
+                self._sync_watchdog.phase = f"vLLM update and broadcast of {name}"
             use_ray = getattr(self.strategy.args.vllm, "sync_with_ray", False)
             # Fire all vllm engines for broadcast
             if torch.distributed.get_rank() == 0:
@@ -439,7 +556,11 @@ class ActorPPOTrainer(ABC):
 
                     collective.broadcast(param.data, 0, group_name=self._model_update_group)
                 else:
-                    self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                    # Preserve the explicit CUDA stream on the NCCL path; the gloo fallback
+                    # accepts stream=None and ignores it. Both communicators broadcast into
+                    # param.data in place and return the same tensor.
+                    stream = torch.cuda.current_stream() if self.vllm_sync_backend == "nccl" else None
+                    self._model_update_group.broadcast(param.data, src=0, stream=stream)
                 ray.get(refs)
 
         def _handle_cuda_ipc(name, param, do_empty):
@@ -469,7 +590,7 @@ class ActorPPOTrainer(ABC):
                     for engine in self.vllm_engines
                 ]
                 ray.get(refs)
-            torch_dist_barrier_and_cuda_sync()
+            torch_dist_barrier_and_accelerator_sync()
 
         def _param_gather_ctx(param, need_gather):
             """Context manager that gathers sharded/TP-split parameters for weight sync."""
@@ -565,10 +686,12 @@ class ActorPPOTrainer(ABC):
                 with _param_gather_ctx(param, need_gather=zero3):
                     sync_fn(name, param, count == num_params)
 
+        if self._sync_watchdog:
+            self._sync_watchdog.phase = "final synchronize and barrier"
         if cache_reset_refs:
             ray.get(cache_reset_refs)
-        torch.cuda.empty_cache()
-        torch_dist_barrier_and_cuda_sync()
+        torch.accelerator.empty_cache()
+        torch_dist_barrier_and_accelerator_sync()
 
     def _get_leaf_modules(self, root, use_lora):
         """Return (name, module) leaf modules for weight sync.
@@ -615,7 +738,10 @@ class PolicyModelActor(BaseModelActor):
 
         # Skip for vLLM >= 0.16 where NCCL_CUMEM_ENABLE=0 causes ncclCommInitRank to fail
         # with "unhandled cuda error" under NCCL 2.27+.
-        if getattr(args.vllm, "sync_backend", "nccl") == "nccl":
+        # Only relevant when vLLM engines are actually in use - vllm may not be
+        # installed at all when running with --vllm.num_engines 0.
+        colocated = args.train.colocate_all and not args.train.async_enable
+        if vllm_engines and resolve_vllm_sync_backend(getattr(args.vllm, "sync_backend", None), colocated) == "nccl":
             import vllm
             from packaging import version as pkg_version
 
@@ -794,4 +920,4 @@ class PolicyModelActor(BaseModelActor):
                 save_path,
             )
         # wait
-        torch_dist_barrier_and_cuda_sync()
+        torch_dist_barrier_and_accelerator_sync()
