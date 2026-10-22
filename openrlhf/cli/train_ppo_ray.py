@@ -1,5 +1,6 @@
 import argparse
 import os
+import uuid
 from datetime import datetime
 
 import ray
@@ -14,26 +15,73 @@ from openrlhf.trainer.ray.launcher import (
 from openrlhf.trainer.ray.ppo_actor import PolicyModelActor
 from openrlhf.trainer.ray.ppo_critic import CriticModelActor
 from openrlhf.utils import get_strategy
+from openrlhf.utils.distributed_util import XcclUnavailableError, resolve_vllm_sync_backend, xccl_watchdog_markers
+from openrlhf.utils.logging_utils import init_logger
+
+logger = init_logger(__name__)
 
 
-def train(args):
-    # initialize ray if not initialized
-    if not ray.is_initialized():
-        # Use os.environ.get() to respect user-set values (e.g. NCCL_DEBUG=INFO via
-        # ray job submit --runtime-env-json), falling back to sensible defaults.
-        ray.init(
-            runtime_env={
-                "env_vars": {
-                    "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM", "true"),
-                    "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
-                    "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
-                }
-            }
+def _require_ray_noset_on_xpu():
+    """On Intel XPU every actor selects its Ray-assigned XPU by index with all XPUs visible, so Ray must
+    not restrict device visibility itself: Ray's ONEAPI_DEVICE_SELECTOR is applied after the actor has
+    started, which remaps or hides physical XPUs and lands the trainer, or vLLM, on the wrong one."""
+    import torch
+
+    if getattr(torch.version, "xpu", None) and os.environ.get("RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR") != "1":
+        raise RuntimeError(
+            "Intel XPU with vLLM engines requires RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1. Without it, Ray's "
+            "own device isolation (ONEAPI_DEVICE_SELECTOR) remaps physical XPUs per actor after the actor process has "
+            "started, so the trainer and vLLM can end up on the same physical XPU (typically XPU 0). Export "
+            "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1 before `ray start` (or ray.init) and restart the Ray "
+            "cluster; the environment cannot be repaired after the XPU runtime has initialized."
         )
 
-    # configure strategy
-    strategy = get_strategy(args)
-    strategy.print(args)
+
+def _xccl_fallback_reason(args, error):
+    """Why a failed launch lets auto mode fall back to gloo, or None: the original error is re-raised.
+
+    Only XCCL-specific failures qualify: an XcclUnavailableError (placement check, preflight), or an
+    actor death the XCCL setup watchdog marked for this launch attempt. Any other actor death (OOM,
+    model load, configuration, crash) is not an XCCL failure. Explicit xccl never falls back."""
+    if getattr(args.vllm, "sync_backend_requested", None) not in (None, "auto") or args.vllm.sync_backend != "xccl":
+        return None
+    if isinstance(error, XcclUnavailableError):
+        return str(getattr(error, "cause", None) or error)  # Ray wraps it; log the original message
+    if isinstance(error, ray.exceptions.RayActorError):
+        for m in xccl_watchdog_markers(getattr(args.vllm, "xccl_attempt", None)):
+            if m.get("stage") == "setup":
+                return (
+                    f"the XCCL setup watchdog ended {m.get('actor')} rank {m.get('rank')} "
+                    f"({m.get('uuid')}, {m.get('pci')}): {m.get('what')} did not finish within "
+                    f"{m.get('timeout_s')} s (phase: {m.get('phase')})"
+                )
+    return None
+
+
+def _stop_actors(created, placement_groups_before):
+    """Stop every actor of a failed launch and release its placement groups, before relaunching."""
+    from ray.util.placement_group import PlacementGroup, remove_placement_group
+
+    for engine in created["vllm_engines"]:
+        try:
+            ray.get(engine.shutdown.remote(), timeout=60)  # also stops vLLM's engine-core process
+        except Exception as e:
+            logger.warning(f"vLLM engine shutdown failed ({e}); killing it")
+    actors = created["vllm_engines"] + created["actors"]
+    for actor in actors:
+        ray.kill(actor)
+    for pg_id, info in ray.util.placement_group_table().items():
+        if pg_id not in placement_groups_before and info["state"] != "REMOVED":
+            remove_placement_group(PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg_id))))
+    for actor in actors:  # confirm every process is gone before recreating anything
+        try:
+            ray.get(actor.__ray_ready__.remote(), timeout=60)
+        except ray.exceptions.RayActorError:
+            continue
+        raise RuntimeError(f"Actor {actor} is still alive after ray.kill(); cannot fall back to gloo safely")
+
+
+def _launch(args, strategy, created):
 
     # init vllm / actor /critic /ref /reward model
     # if colocated, create placement group for actor and ref model explicitly.
@@ -79,6 +127,7 @@ def train(args):
             agent_func_path=args.train.agent_func_path,
             remote_rm_url=args.reward.remote_url,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
+            weight_sync_backend=args.vllm.sync_backend,
         )
 
     actor_model = RayActorGroup(
@@ -164,6 +213,12 @@ def train(args):
         top_p=args.rollout.top_p,
     )
 
+    # Everything a failed XCCL attempt must stop before falling back to gloo (see train()).
+    created["vllm_engines"] = vllm_engines or []
+    created["actors"] = [ppo_trainer] + [
+        h for group in (actor_model, ref_model, critic_model, reward_model) if group for h in group._actor_handlers
+    ]
+
     # training update steps
     max_steps = ray.get(ppo_trainer.get_max_steps.remote())
 
@@ -183,6 +238,57 @@ def train(args):
         # TODO: use first reward model as critic model
         refs = critic_model.async_init_model_from_pretrained(strategy, args.critic.model_name_or_path, max_steps)
         ray.get(refs)
+    return ppo_trainer, actor_model, critic_model
+
+
+def train(args):
+    # initialize ray if not initialized
+    if not ray.is_initialized():
+        # Use os.environ.get() to respect user-set values (e.g. NCCL_DEBUG=INFO via
+        # ray job submit --runtime-env-json), falling back to sensible defaults.
+        ray.init(
+            runtime_env={
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM", "true"),
+                    "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
+                    "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
+                }
+            }
+        )
+
+    # configure strategy
+    strategy = get_strategy(args)
+    strategy.print(args)
+
+    # Decide the weight-sync backend before any actor exists. On Intel XPU, gloo and XCCL both pin vLLM
+    # by explicit device_ids with every XPU visible; only the weight-sync transport differs.
+    if args.vllm.num_engines:
+        _require_ray_noset_on_xpu()
+        args.vllm.sync_backend_requested = args.vllm.sync_backend
+        args.vllm.sync_backend = resolve_vllm_sync_backend(
+            args.vllm.sync_backend, colocated=args.train.colocate_all and not args.train.async_enable
+        )
+
+    # Auto mode falls back to gloo when XCCL weight sync fails its placement checks or preflight:
+    # every actor of the failed attempt is stopped and recreated with gloo, pinned by the same
+    # device_ids. A process that has touched XCCL is never reused. Each launch attempt gets its own
+    # ID, which scopes the XCCL watchdog's failure markers to that attempt.
+    created = {"vllm_engines": [], "actors": []}
+    placement_groups_before = set(ray.util.placement_group_table())
+    args.vllm.xccl_attempt = uuid.uuid4().hex
+    try:
+        ppo_trainer, actor_model, critic_model = _launch(args, strategy, created)
+    except Exception as e:
+        reason = _xccl_fallback_reason(args, e)
+        if reason is None:
+            raise
+        logger.warning(f"XCCL weight sync is unavailable: {reason}")
+        logger.warning("Falling back to gloo (CPU-staged) weight sync: recreating the vLLM and training actors")
+        _stop_actors(created, placement_groups_before)
+        args.vllm.sync_backend = "gloo"
+        args.vllm.sync_backend_fallback = True
+        args.vllm.xccl_attempt = uuid.uuid4().hex
+        ppo_trainer, actor_model, critic_model = _launch(args, strategy, {"vllm_engines": [], "actors": []})
 
     # train actor and critic model
     ray.get(ppo_trainer.fit.remote())
@@ -237,7 +343,24 @@ if __name__ == "__main__":
         default=1,
         help="tensor parallel size of vLLM Engine for multi-GPU inference",
     )
-    parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="DeepSpeed -> vLLM weight sync backend")
+    parser.add_argument(
+        "--vllm.sync_backend",
+        choices=("auto", "nccl", "gloo", "xccl"),
+        default="auto",
+        help=(
+            "DeepSpeed -> vLLM weight-sync backend. "
+            "'auto': nccl on CUDA/ROCm; on Intel XPU xccl when every prerequisite holds, else gloo. "
+            "'nccl': CUDA/ROCm native GPU-to-GPU. "
+            "'xccl': Intel XPU direct XPU-to-XPU (needs RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1). "
+            "'gloo': CPU-staged broadcast, works on any accelerator."
+        ),
+    )
+    parser.add_argument(
+        "--vllm.sync_timeout",
+        type=int,
+        default=600,
+        help="Seconds one XCCL weight sync may take before the job is stopped (a hung XCCL collective never times out by itself).",
+    )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
     parser.add_argument("--vllm.enable_prefix_caching", action="store_true", default=False)
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")

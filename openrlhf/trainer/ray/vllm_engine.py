@@ -4,21 +4,53 @@ from copy import deepcopy
 from typing import Any, List, Optional
 
 import ray
-import vllm
 from packaging import version
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from vllm.inputs import TokensPrompt
-from vllm.utils import random_uuid
-
-from openrlhf.utils.agent import AgentExecutorBase, SingleTurnAgentExecutor
 
 from .utils import get_bundle_indices, ray_noset_visible_devices
 
+# vllm and openrlhf.utils.agent are imported inside the functions that use them: in a Ray actor,
+# device visibility must be configured before anything initializes the accelerator runtime.
 
-def _load_agent_executor(agent_func_path: str) -> AgentExecutorBase:
+
+def _is_xpu_build():
+    """Intel XPU build of torch. Reads torch.version, so no accelerator runtime is initialized."""
+    import torch
+
+    return bool(getattr(torch.version, "xpu", None))
+
+
+def _require_native_xpu_device_ids(vllm):
+    """vLLM's XPU worker places itself by device_ids from vLLM 0.31 on (vllm-project/vllm#56015). Older or
+    unrecognized XPU workers bind xpu:{local_rank}, which would put every engine on xpu:0: refuse them."""
+    import inspect
+
+    from vllm.v1.worker.xpu_worker import XPUWorker
+
+    native = "assigned_physical_gpu_ids" in inspect.getsource(XPUWorker.init_device)
+    if version.parse(vllm.__version__) < version.parse("0.31.0") or not native:
+        raise RuntimeError(
+            f"Intel XPU needs vLLM >= 0.31, whose XPU worker places itself by device_ids (found vLLM "
+            f"{vllm.__version__}; {XPUWorker.__qualname__}.init_device {'reads' if native else 'does not read'} "
+            "assigned_physical_gpu_ids). Refusing to fall back to placement by local rank."
+        )
+
+
+def _ray_gpu_ids():
+    """Ray's accelerator assignment for this actor. Under RAY_EXPERIMENTAL_NOSET_* the IDs are
+    strings, under Ray's own isolation ints; on Intel XPU they are Level Zero device indices."""
+    gpu_ids = [int(g) for g in ray.get_gpu_ids()]
+    if not gpu_ids:
+        raise RuntimeError("Ray did not assign an accelerator to the vLLM actor")
+    return gpu_ids
+
+
+def _load_agent_executor(agent_func_path: str):
     assert agent_func_path.endswith(".py"), "Agent path must be a Python file"
     import importlib.util
+
+    from openrlhf.utils.agent import AgentExecutorBase
 
     spec = importlib.util.spec_from_file_location("agent_module", agent_func_path)
     agent_module = importlib.util.module_from_spec(spec)
@@ -43,11 +75,26 @@ class RolloutRayActor:
         mm_pad_token_ids: Optional[set] = None,
         **kwargs,
     ):
-        self._configure_device_env(
+        weight_sync_backend = kwargs.pop("weight_sync_backend", None)
+        device_ids = self._configure_device_env(
             backend=kwargs.get("distributed_executor_backend"),
             bundle_indices=bundle_indices,
             num_gpus=kwargs.pop("num_gpus"),
+            weight_sync_backend=weight_sync_backend,
         )
+
+        import vllm
+
+        from openrlhf.utils.agent import SingleTurnAgentExecutor
+
+        if _is_xpu_build() and kwargs.get("pipeline_parallel_size", 1) > 1:
+            # vLLM's PP send/recv can deadlock on XPU when its sampled-token broadcast runs on a second XCCL
+            # communicator while sends are in flight; reproduced without vLLM.
+            raise NotImplementedError("vLLM pipeline parallelism is not supported on Intel XPU")
+        if device_ids is not None:
+            _require_native_xpu_device_ids(vllm)
+            kwargs["device_ids"] = device_ids
+            print(f"vLLM {vllm.__version__} pinned to XPU device_ids={device_ids} (native)", flush=True)
         self._configure_vllm_env(version, vllm, kwargs.pop("full_determinism", False))
 
         # Execution mode mapping:
@@ -68,24 +115,44 @@ class RolloutRayActor:
         # before passing to vLLM (avoids double-expansion).
         self._mm_pad_token_ids = mm_pad_token_ids
 
-    def _configure_device_env(self, backend, bundle_indices, num_gpus):
-        if backend == "ray":
-            # a hack to make the script work.
-            # stop ray from manipulating *_VISIBLE_DEVICES
-            # at the top-level when the distributed_executor_backend is ray.
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
-            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+    def _configure_device_env(self, backend, bundle_indices, num_gpus, weight_sync_backend=None):
+        """Pin this actor's vLLM to its Ray-assigned accelerator before vLLM is imported.
+
+        Returns the device_ids engine argument when vLLM is pinned by device index (Intel XPU,
+        TP=1, Ray not restricting visibility), else None.
+        """
+        device_ids = None
+        if not _is_xpu_build():
+            if backend == "ray":
+                # a hack to make the script work.
+                # stop ray from manipulating *_VISIBLE_DEVICES
+                # at the top-level when the distributed_executor_backend is ray.
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+                os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            elif ray_noset_visible_devices():
+                # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
+                # when the distributed_executor_backend is not ray and
+                # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
+        elif backend == "ray":
+            # vLLM's Ray executor assigns XPUs to its workers; pass no mask or selector down.
+            for env_var in ("ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK"):
+                os.environ.pop(env_var, None)
         elif ray_noset_visible_devices():
-            # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
-            # when the distributed_executor_backend is not ray and
-            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
+            # Pin by device index, whatever the weight-sync backend: every XPU stays visible (XCCL needs
+            # that) and the Ray-assigned XPU IDs go to vLLM's device_ids engine argument. No mask.
+            for env_var in ("ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK"):
+                os.environ.pop(env_var, None)
+            device_ids = _ray_gpu_ids()
+        # Otherwise Ray's own isolation (ONEAPI_DEVICE_SELECTOR set by Ray) leaves vLLM exactly its
+        # assigned XPU, visible as xpu:0; there is nothing to index into.
 
         if bundle_indices is not None:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
             os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
             print(f"creating LLM with bundle_indices={bundle_indices}")
+        return device_ids
 
     def _configure_vllm_env(self, version, vllm, full_determinism: bool):
         assert version.parse(vllm.__version__) > version.parse(
@@ -111,6 +178,18 @@ class RolloutRayActor:
             "init_process_group",
             args=(master_address, master_port, rank_offset, world_size, group_name, backend, use_ray),
         )
+
+    def shutdown(self):
+        """Stop the vLLM engine, including its engine-core process (used before recreating actors)."""
+        self.llm.shutdown()
+
+    async def xpu_identity(self):
+        """Ray's assignment for this actor plus each vLLM worker's XPU placement report."""
+        return {
+            "actor_id": ray.get_runtime_context().get_actor_id(),
+            "ray_gpu_ids": [int(g) for g in ray.get_gpu_ids()],
+            "workers": await self.llm.collective_rpc("xpu_identity"),
+        }
 
     async def update_weight(self, name, dtype, shape, empty_cache=False):
         return await self.llm.collective_rpc(
@@ -159,6 +238,9 @@ class RolloutRayActor:
             from openrlhf.utils.vlm_utils import dedup_media_tokens
 
             prompt_token_ids = dedup_media_tokens(prompt_token_ids, self._mm_pad_token_ids)
+
+        from vllm.inputs import TokensPrompt
+        from vllm.utils import random_uuid
 
         prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
         if multi_modal_data:
@@ -222,6 +304,7 @@ def create_vllm_engines(
     agent_func_path: Optional[str] = None,
     remote_rm_url: Optional[str] = None,
     max_images_per_prompt: int = 0,
+    weight_sync_backend: Optional[str] = None,
 ):
     """Spin up a set of vLLM Ray actors with consistent placement."""
     # Detect VLM pad token IDs once, shared across all engines.
@@ -277,6 +360,7 @@ def create_vllm_engines(
             "bundle_indices": bundle_indices,
             "num_gpus": 0.2 if use_hybrid_engine else 1,
             "enable_sleep_mode": vllm_enable_sleep,
+            "weight_sync_backend": weight_sync_backend,
         }
 
         actor_kwargs.update(
@@ -291,6 +375,8 @@ def create_vllm_engines(
             actor_kwargs["limit_mm_per_prompt"] = {"image": max_images_per_prompt}
 
         if logprobs_mode:
+            import vllm
+
             actor_kwargs["logprobs_mode"] = logprobs_mode
             actor_kwargs["max_logprobs"] = 1
             assert version.parse(vllm.__version__) > version.parse(
