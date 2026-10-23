@@ -15,10 +15,6 @@ from openrlhf.trainer.ray.launcher import (
 from openrlhf.trainer.ray.ppo_actor import PolicyModelActor
 from openrlhf.trainer.ray.ppo_critic import CriticModelActor
 from openrlhf.utils import get_strategy
-from openrlhf.utils.distributed_util import XcclUnavailableError, resolve_vllm_sync_backend, xccl_watchdog_markers
-from openrlhf.utils.logging_utils import init_logger
-
-logger = init_logger(__name__)
 
 
 def _require_ray_noset_on_xpu():
@@ -43,6 +39,8 @@ def _xccl_fallback_reason(args, error):
     Only XCCL-specific failures qualify: an XcclUnavailableError (placement check, preflight), or an
     actor death the XCCL setup watchdog marked for this launch attempt. Any other actor death (OOM,
     model load, configuration, crash) is not an XCCL failure. Explicit xccl never falls back."""
+    from openrlhf.utils.distributed_util import XcclUnavailableError, xccl_watchdog_markers
+
     if getattr(args.vllm, "sync_backend_requested", None) not in (None, "auto") or args.vllm.sync_backend != "xccl":
         return None
     if isinstance(error, XcclUnavailableError):
@@ -66,13 +64,17 @@ def _stop_actors(created, placement_groups_before):
         try:
             ray.get(engine.shutdown.remote(), timeout=60)  # also stops vLLM's engine-core process
         except Exception as e:
-            logger.warning(f"vLLM engine shutdown failed ({e}); killing it")
+            print(f"[Warning] vLLM engine shutdown failed ({e}); killing it")
     actors = created["vllm_engines"] + created["actors"]
     for actor in actors:
         ray.kill(actor)
-    for pg_id, info in ray.util.placement_group_table().items():
-        if pg_id not in placement_groups_before and info["state"] != "REMOVED":
-            remove_placement_group(PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg_id))))
+    # Only this job's: the placement-group table is cluster-wide, Ray's state API knows each group's job.
+    from ray.util.state import list_placement_groups
+
+    job_id = ray.get_runtime_context().get_job_id()
+    for pg in list_placement_groups(filters=[("creator_job_id", "=", job_id)], limit=10000):
+        if pg.placement_group_id not in placement_groups_before and pg.state != "REMOVED":
+            remove_placement_group(PlacementGroup(ray.PlacementGroupID(bytes.fromhex(pg.placement_group_id))))
     for actor in actors:  # confirm every process is gone before recreating anything
         try:
             ray.get(actor.__ray_ready__.remote(), timeout=60)
@@ -267,7 +269,16 @@ def train(args):
     # Decide the weight-sync backend before any actor exists. On Intel XPU, gloo and XCCL both pin vLLM
     # by explicit device_ids with every XPU visible; only the weight-sync transport differs.
     if args.vllm.num_engines:
+        import torch
+
+        from openrlhf.utils.distributed_util import resolve_vllm_sync_backend
+
         _require_ray_noset_on_xpu()
+        if getattr(torch.version, "xpu", None) and args.vllm.sync_with_ray:
+            raise ValueError(
+                "--vllm.sync_with_ray is not supported on Intel XPU: Ray collective supports only NCCL and GLOO. "
+                "Drop it; --vllm.sync_backend gloo or xccl syncs weights without Ray collective."
+            )
         args.vllm.sync_backend_requested = args.vllm.sync_backend
         args.vllm.sync_backend = resolve_vllm_sync_backend(
             args.vllm.sync_backend, colocated=args.train.colocate_all and not args.train.async_enable
@@ -286,8 +297,8 @@ def train(args):
         reason = _xccl_fallback_reason(args, e)
         if reason is None:
             raise
-        logger.warning(f"XCCL weight sync is unavailable: {reason}")
-        logger.warning("Falling back to gloo (CPU-staged) weight sync: recreating the vLLM and training actors")
+        print(f"[Warning] XCCL weight sync is unavailable: {reason}")
+        print("[Warning] Falling back to gloo (CPU-staged) weight sync: recreating the vLLM and training actors")
         _stop_actors(created, placement_groups_before)
         args.vllm.sync_backend = "gloo"
         args.vllm.sync_backend_fallback = True
@@ -363,7 +374,7 @@ if __name__ == "__main__":
         "--vllm.sync_timeout",
         type=int,
         default=600,
-        help="Seconds one XCCL weight sync may take before the job is stopped (a hung XCCL collective never times out by itself).",
+        help="Seconds the XCCL weight sync of one tensor may take before the job is stopped (a hung XCCL collective never times out by itself).",
     )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
     parser.add_argument("--vllm.enable_prefix_caching", action="store_true", default=False)
