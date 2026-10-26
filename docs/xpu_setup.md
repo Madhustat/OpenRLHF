@@ -398,6 +398,7 @@ XCCL needs `pidfd_getfd()`, which Docker's default seccomp profile denies: run w
 | `serve_remote_rm` with 2 XPUs visible | upstream issue #938 (`device_map="auto"` splits the model); pin it to one XPU |
 | `train_rm` with fewer than 100 samples and no eval dataset | the eval split has 0 rows; use at least 100 samples |
 | PPO + critic at TP=2 with 2 trainer ranks and `--ds.adam_offload` | host RAM can run out (Ray kills a worker) |
+| A hung XCCL sync stopped by `--vllm.sync_timeout` | the job stops as described; while the trainer exits, the XPU driver resets that XPU's compute engine once (its broadcast was still waiting for the peer). Measured once, both XPUs healthy afterwards; check the kernel log (section 6) before the next run |
 | Shared GPUs | another job on the same XPUs breaks runs. After any `reset` / `wedged` / `fault` kernel message, check the XPUs (section 6) before the next run |
 
 ## 9. Validated on this branch and environment (October 2026)
@@ -405,7 +406,7 @@ XCCL needs `pidfd_getfd()`, which Docker's default seccomp profile denies: run w
 | Test | Result |
 |---|---|
 | Unit tests | 246 passed, 2 skipped |
-| Weight sync end to end: XCCL, gloo, `auto` with vLLM on its own XPU and with vLLM sharing the trainer's XPU | all pass, every checked weight bit-identical in vLLM (XCCL rerun on the final code: 5/5 steps, 20/20 checks) |
+| Weight sync end to end: XCCL, gloo, `auto` with vLLM on its own XPU and with vLLM sharing the trainer's XPU | all pass on the final code: 5/5 steps, every checked weight bit-identical in vLLM (20/20 per run); a frozen vLLM worker stops the job after `--vllm.sync_timeout` |
 | Weight-sync time (Qwen2.5-0.5B, 290 tensors, vLLM on its own XPU) | XCCL 0.73 s per sync, gloo 1.22 s (the transfer itself 0.08 s vs 0.51 s). The first sync takes about 8 s with either backend (one-time warm-up) |
 | 17 upstream example cases on 2 XPUs | 16 pass; `serve_remote_rm` fails (#938) |
 | 80-cell layout matrix (ZeRO-0 to 3, vLLM / DeepSpeed sleep, TP=1/TP=2, with and without a critic) | 54 pass, 8 not allowed by OpenRLHF, 9 unsupported by DeepSpeed (ZeRO-0 + DeepSpeed sleep), 1 fail, 2 GPU faults (ZeRO-3), 6 ZeRO-3 cells not run |
