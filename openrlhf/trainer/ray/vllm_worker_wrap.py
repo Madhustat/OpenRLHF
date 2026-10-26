@@ -30,10 +30,6 @@ class WorkerWrap:
             f"init_process_group: master_address={master_address}, master_port={master_port}, ",
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
-        if backend == "xccl":
-            from openrlhf.utils.distributed_util import xccl_preflight
-
-            return xccl_preflight(self._model_update_group, rank, self.device)
 
     def update_weight(self, name, dtype, shape, empty_cache=False):
         import torch

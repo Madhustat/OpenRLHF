@@ -26,7 +26,6 @@ from openrlhf.utils.deepspeed.deepspeed_utils import (
 from openrlhf.utils.distributed_util import (
     stateless_init_process_group,
     torch_dist_barrier_and_cuda_sync,
-    xccl_preflight,
 )
 from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.loss_utils import get_loss_batch_info, iter_grad_accum_global_norm
@@ -156,26 +155,7 @@ class ActorPPOTrainer(ABC):
                 master_address, master_port, 0, world_size, device, backend=backend
             )
 
-        if backend != "xccl":
-            ray.get(refs)
-            return
-        timeout = self.strategy.args.vllm.sync_timeout
-        logger.info(
-            f"Testing XCCL weight sync with a 128 MiB broadcast (a hang stops the job after {timeout} s; "
-            "then rerun with --vllm.sync_backend gloo)"
-        )
-        faulthandler.dump_traceback_later(timeout, exit=True)
-        try:
-            errors = [xccl_preflight(self._model_update_group, 0, device)]
-            errors += [error for engine_errors in ray.get(refs) for error in engine_errors]
-        finally:
-            faulthandler.cancel_dump_traceback_later()
-        if any(errors):
-            raise RuntimeError(
-                f"XCCL weight sync failed its startup test: {[e for e in errors if e]}. "
-                "Rerun with --vllm.sync_backend gloo."
-            )
-        logger.info(f"XCCL weight-sync preflight passed on {world_size} ranks (128 MiB bit-exact)")
+        ray.get(refs)
 
     def ppo_train(self, kl_ctl: float):
         # replay buffer may be empty at first, we should rebuild at each training

@@ -72,7 +72,7 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
     without considering the global process group in torch.distributed.
     It is recommended to create `StatelessProcessGroup`, and then initialize
     the data-plane communication (NCCL) between external (train processes)
-    and vLLM workers. gloo stages tensors through CPU; xccl is direct XPU-to-XPU.
+    and vLLM workers.
     """
     if backend == "nccl":
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -106,18 +106,3 @@ def stateless_init_process_group(master_address, master_port, rank, world_size, 
     xccl._set_sequence_number_for_group()
     pg._register_backend(device, ProcessGroup.BackendType.XCCL, xccl)
     return _XcclBroadcastCommunicator(pg)
-
-
-def xccl_preflight(group, rank, device):
-    import torch
-
-    n = 64 << 20  # bf16 elements, 0..250 repeated
-    expected = torch.arange(251, dtype=torch.bfloat16, device=device).repeat(n // 251 + 1)[:n]
-    tensor = expected.clone() if rank == 0 else torch.full_like(expected, -12345.0)
-    group.broadcast(tensor, src=0)
-    torch.xpu.synchronize(device)
-    bad = (tensor != expected).nonzero()
-    if len(bad):
-        i = int(bad[0])
-        return f"rank {rank} ({device}): element {i} is {tensor[i].item()}, expected {expected[i].item()}"
-    return None

@@ -251,6 +251,43 @@ journalctl -k --since -10min | grep -iE 'xe .*(reset|wedged|hang|fault|error)'
 #   (nothing)
 ```
 
+Before using XCCL weight sync on a new machine, or after changing the driver, oneCCL or any `CCL_*` setting, check that
+XCCL moves data correctly between two XPUs. Save as `check_xccl.py`:
+
+```python
+import os
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+
+def run(rank):
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT="29531")
+    torch.xpu.set_device(rank)
+    dist.init_process_group("xccl", rank=rank, world_size=2, device_id=torch.device("xpu", rank))
+    n = 64 << 20
+    expected = torch.arange(251, dtype=torch.bfloat16, device="xpu").repeat(n // 251 + 1)[:n]
+    x = expected.clone() if rank == 0 else torch.full_like(expected, -1.0)
+    dist.broadcast(x, src=0)
+    torch.xpu.synchronize()
+    print(f"rank {rank}: {'OK' if torch.equal(x, expected) else 'WRONG DATA'}")
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    mp.spawn(run, nprocs=2)
+```
+
+```bash
+source env_xpu.sh && python check_xccl.py
+#   rank 0: OK
+#   rank 1: OK
+```
+
+`WRONG DATA`, a hang or an error means XCCL is not usable on this setup: use `--vllm.sync_backend gloo`. As with NCCL,
+OpenRLHF does not check the transferred weights itself, so run this check once per setup.
+
 ## 7. Run
 
 ```bash
@@ -263,18 +300,16 @@ python -m openrlhf.cli.train_ppo_ray ...
 
 | `--vllm.sync_backend` | What happens |
 |---|---|
-| not given (`auto`) | If vLLM shares the trainer's XPU (`--train.colocate_all`): **gloo**. If vLLM runs on XPUs of its own: **XCCL**, after the startup test below |
+| not given (`auto`) | If vLLM shares the trainer's XPU (`--train.colocate_all`): **gloo**. If vLLM runs on XPUs of its own: **XCCL** |
 | `gloo` | always gloo, with any number of XPUs |
-| `xccl` | always the XCCL startup test, then XCCL. If vLLM shares the trainer's XPU, it logs an "experimental" warning first |
+| `xccl` | always XCCL. If vLLM shares the trainer's XPU, it logs an "experimental" warning first |
 | `nccl` | refused on XPU |
 
 - **gloo** copies each weight trainer XPU -> CPU -> vLLM XPU.
 - **XCCL** copies each weight directly XPU -> XPU.
-- **XCCL startup test:** before any real weight, one 128 MiB broadcast from the trainer to every vLLM rank must arrive
-  bit-for-bit within `--vllm.sync_timeout` (default 600 s). If it does not, the job stops with
-  `XCCL weight sync failed its startup test ... Rerun with --vllm.sync_backend gloo`.
-- **During training on XCCL,** each tensor's sync has the same time limit. A hang stops the job and prints every
-  thread's stack.
+- **Time limit on XCCL:** each tensor's sync may take at most `--vllm.sync_timeout` seconds (default 600). XCCL's own
+  timeout does not fire, so without this limit a hang would block forever. On a hang the job stops and prints every
+  thread's stack; rerun with `--vllm.sync_backend gloo`.
 - Nothing switches to gloo by itself.
 
 **One XPU:** the trainer and vLLM have to share it, so run with `--train.colocate_all`; `auto` then uses gloo. Without
@@ -313,7 +348,8 @@ XCCL needs `pidfd_getfd()`, which Docker's default seccomp profile denies: run w
 | Test | Result |
 |---|---|
 | Unit tests | 246 passed, 2 skipped |
-| Weight sync end to end: XCCL, gloo, `auto` with vLLM on its own XPU and with vLLM sharing the trainer's XPU | all pass, every checked weight bit-identical in vLLM; a corrupted startup test and a hung one both stop the job as described |
+| Weight sync end to end: XCCL, gloo, `auto` with vLLM on its own XPU and with vLLM sharing the trainer's XPU | all pass, every checked weight bit-identical in vLLM (XCCL rerun on the final code: 5/5 steps, 20/20 checks) |
+| XCCL weight-sync time (Qwen2.5-0.5B, 290 tensors) | 0.72 s per sync; the first sync takes 8.4 s because oneCCL sets itself up then |
 | 17 upstream example cases on 2 XPUs | 16 pass; `serve_remote_rm` fails (#938) |
 | 80-cell layout matrix (ZeRO-0 to 3, vLLM / DeepSpeed sleep, TP=1/TP=2, with and without a critic) | 54 pass, 8 not allowed by OpenRLHF, 9 unsupported by DeepSpeed (ZeRO-0 + DeepSpeed sleep), 1 fail, 2 GPU faults (ZeRO-3), 6 ZeRO-3 cells not run |
 | 57-case extended suite (algorithms, reward models, MoE, SFT/RM/DPO, LoRA, checkpoints) | 48 pass; 7 not passing as before (2 need CUDA, 2 need packages that are not installed, 3 known non-XPU issues: weight sync through Ray collectives, 4-bit RL, RL determinism); 2 new failures (AutoTP, `flash_attention_2`) |

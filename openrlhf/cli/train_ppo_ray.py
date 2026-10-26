@@ -266,7 +266,7 @@ if __name__ == "__main__":
         "--vllm.sync_timeout",
         type=int,
         default=600,
-        help="Seconds the XCCL weight sync of one tensor, or the XCCL startup test, may take before the job is "
+        help="Seconds the XCCL weight sync of one tensor may take before the job is "
         "stopped: a hung XCCL collective never times out by itself",
     )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
