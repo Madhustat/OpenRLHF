@@ -38,7 +38,6 @@ def resolve_vllm_sync_backend(backend, colocated):
 
 
 class _GlooBroadcastCommunicator:
-
     def __init__(self, pg):
         self.pg = pg
 
@@ -53,7 +52,6 @@ class _GlooBroadcastCommunicator:
 
 
 class _XcclBroadcastCommunicator:
-
     def __init__(self, pg):
         self.pg = pg
 

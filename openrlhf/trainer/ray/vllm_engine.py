@@ -55,7 +55,7 @@ class RolloutRayActor:
                 "0.31.0"
             ), f"Intel XPU needs vLLM >= 0.31, not {vllm.__version__}"
             kwargs["device_ids"] = device_ids
-            print(f"vLLM {vllm.__version__} pinned to XPU device_ids={device_ids} (native)", flush=True)
+            print(f"vLLM {vllm.__version__} pinned to XPU device_ids={device_ids}", flush=True)
         self._configure_vllm_env(version, vllm, kwargs.pop("full_determinism", False))
 
         # Execution mode mapping:
