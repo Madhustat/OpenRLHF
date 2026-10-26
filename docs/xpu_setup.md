@@ -259,7 +259,7 @@ python -c "import vllm.distributed.parallel_state as p, hashlib; print(hashlib.s
 python -m pip list --format=freeze | sort | diff - <(sort $R/docs/xpu_pip_freeze.txt)
 #   (nothing: the same 248 packages as the validated environment)
 cd $R && HF_HUB_OFFLINE=1 python -m pytest -q -p no:cacheprovider tests/
-#   264 passed, 2 skipped
+#   246 passed, 2 skipped
 journalctl -k --since -10min | grep -iE 'xe .*(reset|wedged|hang|fault|error)'
 #   (nothing)
 ```
@@ -406,7 +406,7 @@ validated in Docker with `--security-opt seccomp=unconfined --cap-add SYS_PTRACE
 
 | Test | Result |
 |---|---|
-| Unit tests | 264 passed, 2 skipped (including the weight-sync tests in `tests/test_vllm_sync_backend.py`) |
+| Unit tests | 246 passed, 2 skipped |
 | Weight sync end to end: XCCL, gloo, `auto` with vLLM on its own XPU and with vLLM sharing the trainer's XPU | all pass on the final code: 5/5 steps, every checked weight bit-identical in vLLM (20/20 per run); a frozen vLLM worker stops the job after `--vllm.sync_timeout` |
 | Weight-sync time (Qwen2.5-0.5B, 290 tensors, vLLM on its own XPU) | XCCL 0.73 s per sync, gloo 1.22 s (the transfer itself 0.08 s vs 0.51 s). The first sync takes about 8 s with either backend (one-time warm-up) |
 | 17 upstream example cases on 2 XPUs | 16 pass; `serve_remote_rm` fails (#938) |
