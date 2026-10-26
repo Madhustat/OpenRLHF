@@ -49,6 +49,9 @@ Check: `xpu-smi discovery` lists the GPUs.
 | Others | ray 2.55.0, accelerate 1.14.0, peft 0.20.0, bitsandbytes 0.50.2, datasets 5.1.0, huggingface_hub 2.2.0, tokenizers 0.23.3, numpy 2.3.5, kernels 0.17.2, mpi4py 4.1.2 |
 | flash-attn | not installed (CUDA-only). On XPU `flash_attention_2` comes from the Hub kernel `kernels-community/flash-attn2` through `kernels` |
 
+The complete list of the validated environment (248 packages) is [`xpu_pip_freeze.txt`](xpu_pip_freeze.txt); section 6
+compares your environment with it.
+
 ## 3. Build the environment
 
 Use a shell without a `LD_LIBRARY_PATH` from another Python stack (for example miniforge): an older
@@ -245,6 +248,10 @@ python -c "import torch, vllm, deepspeed; print(torch.__version__, vllm.__versio
 #   2.14.0+xpu 0.32.0 0.19.8+dcd8595c
 python -c "import torch; print(torch.xpu.device_count(), torch.distributed.is_xccl_available())"
 #   2 True
+python -c "import vllm.distributed.parallel_state as p, hashlib; print(hashlib.sha256(open(p.__file__,'rb').read()).hexdigest()[:8])"
+#   bd1edc2f   (the vLLM fix of section 3.5 is applied; stock vLLM 0.32.0 gives 0e47cff9)
+python -m pip list --format=freeze | sort | diff - <(sort $R/docs/xpu_pip_freeze.txt)
+#   (nothing: the same 248 packages as the validated environment)
 cd $R && HF_HUB_OFFLINE=1 python -m pytest -q -p no:cacheprovider tests/
 #   246 passed, 2 skipped
 journalctl -k --since -10min | grep -iE 'xe .*(reset|wedged|hang|fault|error)'
