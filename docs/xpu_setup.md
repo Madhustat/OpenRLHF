@@ -8,7 +8,8 @@ The branch is upstream main `dc2a7ad` plus:
 - PRs #1267, #1268, #1269, #1301, #1302 and #1363;
 - vLLM weight sync on Intel XPU over XCCL (direct XPU-to-XPU) or gloo (through the CPU).
 
-In the commands below, `V` is the Python environment and `R` the OpenRLHF checkout. Change both for your machine:
+Follow the sections in order. In the commands below, `V` is the Python environment and `R` the OpenRLHF checkout.
+Change both for your machine; section 5 sets them again for every new shell:
 
 ```bash
 export V=$HOME/venv_openrlhf_xpu
@@ -60,6 +61,8 @@ Use a shell without a `LD_LIBRARY_PATH` from another Python stack (for example m
 ```bash
 unset LD_LIBRARY_PATH CCL_ROOT FI_PROVIDER_PATH I_MPI_ROOT
 ```
+
+Run all of section 3 in this one shell: `UV`, defined in 3.1, is used by the later steps.
 
 ### 3.1 venv and vLLM
 
@@ -220,6 +223,9 @@ OpenRLHF runs from the checkout through `PYTHONPATH`; it is not pip-installed.
 Save as `env_xpu.sh` and `source` it before any command, including `ray start`:
 
 ```bash
+export V=$HOME/venv_openrlhf_xpu
+export R=$HOME/OpenRLHF
+export ICPX_DIR=/opt/intel/oneapi/compiler/2026.1/bin
 unset CCL_ROOT FI_PROVIDER_PATH I_MPI_ROOT ZE_AFFINITY_MASK ONEAPI_DEVICE_SELECTOR
 export LD_LIBRARY_PATH=$V/lib
 source $V/bin/activate
@@ -297,11 +303,55 @@ OpenRLHF does not check the transferred weights itself, so run this check once p
 
 ## 7. Run
 
+Start Ray after `source env_xpu.sh`, so that Ray sees `RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1`. Use
+`--num-gpus` = the number of XPUs. Stop Ray between runs:
+
 ```bash
 source env_xpu.sh
 ray start --head --num-gpus 2 --disable-usage-stats
 python -m openrlhf.cli.train_ppo_ray ...
+ray stop --force
 ```
+
+### Example end-to-end runs
+
+These are the GRPO runs (Qwen2.5-0.5B, GSM8K, 5 steps) used to validate this branch. First create the prompt file from
+the public GSM8K dataset (`make_gsm8k_prompts.py`):
+
+```python
+import json
+
+from datasets import load_dataset
+
+suffix = " Please reason step by step, and put your final answer within \\boxed{}."
+with open("gsm8k_train_prompts.jsonl", "w") as f:
+    for row in load_dataset("openai/gsm8k", "main", split="train[:400]"):
+        label = row["answer"].split("####")[-1].strip().replace(",", "")
+        f.write(json.dumps({"prompt": row["question"] + suffix, "label": label}) + "\n")
+```
+
+```bash
+source env_xpu.sh && mkdir -p $HOME/data && cd $HOME/data && python make_gsm8k_prompts.py
+cd /tmp
+GRPO="--actor.num_nodes 1 --actor.num_gpus_per_node 1 --actor.model_name_or_path Qwen/Qwen2.5-0.5B
+  --vllm.num_engines 1 --vllm.tensor_parallel_size 1 --vllm.gpu_memory_utilization 0.5 --vllm.enforce_eager
+  --algo.advantage.estimator group_norm --rollout.n_samples_per_prompt 2 --algo.kl.init_coef 0
+  --reward.remote_url $R/examples/python/math_reward_func.py
+  --data.prompt_dataset $HOME/data/gsm8k_train_prompts.jsonl --data.input_key prompt --data.label_key label
+  --data.apply_chat_template --data.max_len 512 --data.max_samples 40
+  --train.batch_size 8 --train.micro_batch_size 4 --rollout.batch_size 8 --train.max_epochs 1 --train.num_episodes 1
+  --ds.zero_stage 2 --ds.attn_implementation sdpa
+  --ckpt.save_steps -1 --ckpt.output_dir /tmp/ckpt --eval.steps -1 --logger.logging_steps 1"
+```
+
+| Case | Ray | Command | Expected in the log |
+|---|---|---|---|
+| 1. XCCL: vLLM on its own XPU | `--num-gpus 2` | `python -m openrlhf.cli.train_ppo_ray $GRPO --train.colocate_actor_ref` | `vLLM weight-sync backend: xccl`, `pinned to XPU device_ids=[1]`, `Global step 1` to `5` |
+| 2. gloo: the same layout, gloo chosen | `--num-gpus 2` | case 1 + `--vllm.sync_backend gloo` | `vLLM weight-sync backend: gloo`, `Global step 1` to `5` |
+| 3. One XPU shared by the trainer and vLLM | `--num-gpus 1` on a one-XPU machine (validated with 2: the run uses only XPU 0) | `python -m openrlhf.cli.train_ppo_ray $GRPO --train.colocate_all --vllm.enable_sleep --ds.enable_sleep` | `vLLM weight-sync backend: gloo`, `pinned to XPU device_ids=[0]`, `Global step 1` to `5` |
+
+`--train.colocate_actor_ref` puts the trainer (and the reference model) on XPU 0, so vLLM gets XPU 1. Each run takes
+about 2 minutes once the model is downloaded. After each run: `ray stop --force`, and check the kernel log (section 6).
 
 ### Weight sync between the trainer and vLLM
 
