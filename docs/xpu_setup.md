@@ -259,7 +259,7 @@ python -c "import vllm.distributed.parallel_state as p, hashlib; print(hashlib.s
 python -m pip list --format=freeze | sort | diff - <(sort $R/docs/xpu_pip_freeze.txt)
 #   (nothing: the same 248 packages as the validated environment)
 cd $R && HF_HUB_OFFLINE=1 python -m pytest -q -p no:cacheprovider tests/
-#   246 passed, 2 skipped
+#   264 passed, 2 skipped
 journalctl -k --since -10min | grep -iE 'xe .*(reset|wedged|hang|fault|error)'
 #   (nothing)
 ```
@@ -382,8 +382,9 @@ They are written for 8 NVIDIA GPUs:
 
 ### Containers
 
-XCCL needs `pidfd_getfd()`, which Docker's default seccomp profile denies: run with `--cap-add SYS_PTRACE` (or
-`--security-opt seccomp=unconfined`), or use `--vllm.sync_backend gloo`.
+oneCCL's default IPC exchange (`pidfd`) needs `pidfd_getfd()`, which Docker's default profile does not allow. XCCL was
+validated in Docker with `--security-opt seccomp=unconfined --cap-add SYS_PTRACE`. Without such permissions, use
+`--vllm.sync_backend gloo`.
 
 ## 8. Known limits
 
@@ -398,14 +399,14 @@ XCCL needs `pidfd_getfd()`, which Docker's default seccomp profile denies: run w
 | `serve_remote_rm` with 2 XPUs visible | upstream issue #938 (`device_map="auto"` splits the model); pin it to one XPU |
 | `train_rm` with fewer than 100 samples and no eval dataset | the eval split has 0 rows; use at least 100 samples |
 | PPO + critic at TP=2 with 2 trainer ranks and `--ds.adam_offload` | host RAM can run out (Ray kills a worker) |
-| A hung XCCL sync stopped by `--vllm.sync_timeout` | the job stops as described; while the trainer exits, the XPU driver resets that XPU's compute engine once (its broadcast was still waiting for the peer). Measured once, both XPUs healthy afterwards; check the kernel log (section 6) before the next run |
+| A hung XCCL sync stopped by `--vllm.sync_timeout` | the job stops and prints all thread stacks. In the tested environment, terminating an intentionally hung XCCL test made the driver reset the affected compute engine, after which the XPU remained usable. This is environment-specific and not a recovery mechanism; check the kernel log (section 6) before the next run |
 | Shared GPUs | another job on the same XPUs breaks runs. After any `reset` / `wedged` / `fault` kernel message, check the XPUs (section 6) before the next run |
 
 ## 9. Validated on this branch and environment (October 2026)
 
 | Test | Result |
 |---|---|
-| Unit tests | 246 passed, 2 skipped |
+| Unit tests | 264 passed, 2 skipped (including the weight-sync tests in `tests/test_vllm_sync_backend.py`) |
 | Weight sync end to end: XCCL, gloo, `auto` with vLLM on its own XPU and with vLLM sharing the trainer's XPU | all pass on the final code: 5/5 steps, every checked weight bit-identical in vLLM (20/20 per run); a frozen vLLM worker stops the job after `--vllm.sync_timeout` |
 | Weight-sync time (Qwen2.5-0.5B, 290 tensors, vLLM on its own XPU) | XCCL 0.73 s per sync, gloo 1.22 s (the transfer itself 0.08 s vs 0.51 s). The first sync takes about 8 s with either backend (one-time warm-up) |
 | 17 upstream example cases on 2 XPUs | 16 pass; `serve_remote_rm` fails (#938) |
@@ -414,4 +415,6 @@ XCCL needs `pidfd_getfd()`, which Docker's default seccomp profile denies: run w
 | GPU memory with the oneCCL settings | flat across steps (with oneCCL defaults: +2 GB per step until vLLM runs out of memory) |
 | Speed with the oneCCL settings | run time unchanged: 7 upstream example cases each within 4 s of the run without them |
 
-Not tested: NVIDIA for this branch; more than 2 XPUs; XCCL between processes sharing one XPU.
+Not validated: NVIDIA for this branch; more than two XPUs; multiple nodes; reordered or non-contiguous TP device
+assignments (they need the vLLM fix of section 3.5); multiple vLLM engines across more XPUs; production use of XCCL
+when the trainer and vLLM share an XPU (allowed, but experimental).
