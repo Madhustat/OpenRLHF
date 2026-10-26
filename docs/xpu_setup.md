@@ -406,7 +406,7 @@ XCCL needs `pidfd_getfd()`, which Docker's default seccomp profile denies: run w
 |---|---|
 | Unit tests | 246 passed, 2 skipped |
 | Weight sync end to end: XCCL, gloo, `auto` with vLLM on its own XPU and with vLLM sharing the trainer's XPU | all pass, every checked weight bit-identical in vLLM (XCCL rerun on the final code: 5/5 steps, 20/20 checks) |
-| XCCL weight-sync time (Qwen2.5-0.5B, 290 tensors) | 0.72 s per sync; the first sync takes 8.4 s because oneCCL sets itself up then |
+| Weight-sync time (Qwen2.5-0.5B, 290 tensors, vLLM on its own XPU) | XCCL 0.73 s per sync, gloo 1.22 s (the transfer itself 0.08 s vs 0.51 s). The first sync takes about 8 s with either backend (one-time warm-up) |
 | 17 upstream example cases on 2 XPUs | 16 pass; `serve_remote_rm` fails (#938) |
 | 80-cell layout matrix (ZeRO-0 to 3, vLLM / DeepSpeed sleep, TP=1/TP=2, with and without a critic) | 54 pass, 8 not allowed by OpenRLHF, 9 unsupported by DeepSpeed (ZeRO-0 + DeepSpeed sleep), 1 fail, 2 GPU faults (ZeRO-3), 6 ZeRO-3 cells not run |
 | 57-case extended suite (algorithms, reward models, MoE, SFT/RM/DPO, LoRA, checkpoints) | 48 pass; 7 not passing as before (2 need CUDA, 2 need packages that are not installed, 3 known non-XPU issues: weight sync through Ray collectives, 4-bit RL, RL determinism); 2 new failures (AutoTP, `flash_attention_2`) |
