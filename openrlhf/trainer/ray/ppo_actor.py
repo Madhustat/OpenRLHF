@@ -1,3 +1,4 @@
+import faulthandler
 import os
 import socket
 from abc import ABC
@@ -144,8 +145,10 @@ class ActorPPOTrainer(ABC):
             collective.init_collective_group(world_size=world_size, rank=0, backend=backend, group_name=group_name)
             self._model_update_group = group_name
         else:
+            accelerator = torch.accelerator.current_accelerator()
+            device = torch.device(accelerator.type, torch.accelerator.current_device_index())
             self._model_update_group = stateless_init_process_group(
-                master_address, master_port, 0, world_size, torch.cuda.current_device()
+                master_address, master_port, 0, world_size, device, backend=backend
             )
 
         ray.get(refs)
@@ -407,6 +410,7 @@ class ActorPPOTrainer(ABC):
         }
 
     def broadcast_to_vllm(self):
+        backend = getattr(self.strategy.args.vllm, "sync_backend", "nccl")
         use_prefix_cache = getattr(self.strategy.args.vllm, "enable_prefix_caching", False)
         cache_reset_refs = []
         if use_prefix_cache and torch.distributed.get_rank() == 0:
@@ -414,7 +418,7 @@ class ActorPPOTrainer(ABC):
             for engine in self.vllm_engines:
                 cache_reset_refs.append(engine.reset_prefix_cache.remote())
 
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         model = self.actor.model.module
         count = 0
 
@@ -422,6 +426,8 @@ class ActorPPOTrainer(ABC):
             use_ray = getattr(self.strategy.args.vllm, "sync_with_ray", False)
             # Fire all vllm engines for broadcast
             if torch.distributed.get_rank() == 0:
+                if backend == "xccl":
+                    faulthandler.dump_traceback_later(self.strategy.args.vllm.sync_timeout, exit=True)
                 shape = param.shape if self.strategy.args.ds.zero_stage != 3 else param.ds_shape
                 refs = [
                     engine.update_weight.remote(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params)
@@ -433,7 +439,8 @@ class ActorPPOTrainer(ABC):
 
                     collective.broadcast(param.data, 0, group_name=self._model_update_group)
                 else:
-                    self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                    stream = torch.cuda.current_stream() if backend == "nccl" else None
+                    self._model_update_group.broadcast(param.data, src=0, stream=stream)
                 ray.get(refs)
 
         def _handle_cuda_ipc(param, count, num_params):
@@ -486,8 +493,9 @@ class ActorPPOTrainer(ABC):
 
         if cache_reset_refs:
             ray.get(cache_reset_refs)
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         torch_dist_barrier_and_cuda_sync()
+        faulthandler.cancel_dump_traceback_later()
 
 
 @ray.remote(num_gpus=1)

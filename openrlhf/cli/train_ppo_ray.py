@@ -35,6 +35,20 @@ def train(args):
     strategy = get_strategy(args)
     strategy.print(args)
 
+    if args.vllm.num_engines:
+        import torch
+
+        from openrlhf.utils.distributed_util import resolve_vllm_sync_backend
+
+        if getattr(torch.version, "xpu", None):
+            assert (
+                os.environ.get("RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR") == "1"
+            ), "Intel XPU needs RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR=1, exported before `ray start`"
+            assert not args.vllm.sync_with_ray, "--vllm.sync_with_ray is not supported on Intel XPU"
+        args.vllm.sync_backend = resolve_vllm_sync_backend(
+            args.vllm.sync_backend, colocated=args.train.colocate_all and not args.train.async_enable
+        )
+
     # init vllm / actor /critic /ref /reward model
     # if colocated, create placement group for actor and ref model explicitly.
     pg = None
@@ -237,7 +251,20 @@ if __name__ == "__main__":
         default=1,
         help="tensor parallel size of vLLM Engine for multi-GPU inference",
     )
-    parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="DeepSpeed -> vLLM weight sync backend")
+    parser.add_argument(
+        "--vllm.sync_backend",
+        choices=("auto", "nccl", "xccl", "gloo"),
+        default="auto",
+        help="DeepSpeed -> vLLM weight sync backend. auto: nccl on CUDA/ROCm; on Intel XPU xccl (direct XPU-to-XPU) "
+        "when vLLM has XPUs of its own, else gloo (CPU-staged)",
+    )
+    parser.add_argument(
+        "--vllm.sync_timeout",
+        type=int,
+        default=600,
+        help="Seconds the XCCL weight sync of one tensor may take before the job is "
+        "stopped: a hung XCCL collective never times out by itself",
+    )
     parser.add_argument("--vllm.sync_with_ray", action="store_true", default=False)
     parser.add_argument("--vllm.enable_prefix_caching", action="store_true", default=False)
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")
