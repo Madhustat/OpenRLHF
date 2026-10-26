@@ -4,21 +4,18 @@ from copy import deepcopy
 from typing import Any, List, Optional
 
 import ray
-import vllm
 from packaging import version
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from vllm.inputs import TokensPrompt
-from vllm.utils import random_uuid
-
-from openrlhf.utils.agent import AgentExecutorBase, SingleTurnAgentExecutor
 
 from .utils import get_bundle_indices, ray_noset_visible_devices
 
 
-def _load_agent_executor(agent_func_path: str) -> AgentExecutorBase:
+def _load_agent_executor(agent_func_path: str):
     assert agent_func_path.endswith(".py"), "Agent path must be a Python file"
     import importlib.util
+
+    from openrlhf.utils.agent import AgentExecutorBase
 
     spec = importlib.util.spec_from_file_location("agent_module", agent_func_path)
     agent_module = importlib.util.module_from_spec(spec)
@@ -43,11 +40,22 @@ class RolloutRayActor:
         mm_pad_token_ids: Optional[set] = None,
         **kwargs,
     ):
-        self._configure_device_env(
+        device_ids = self._configure_device_env(
             backend=kwargs.get("distributed_executor_backend"),
             bundle_indices=bundle_indices,
             num_gpus=kwargs.pop("num_gpus"),
         )
+
+        import vllm
+
+        from openrlhf.utils.agent import SingleTurnAgentExecutor
+
+        if device_ids is not None:
+            assert version.parse(vllm.__version__) >= version.parse(
+                "0.31.0"
+            ), f"Intel XPU needs vLLM >= 0.31, not {vllm.__version__}"
+            kwargs["device_ids"] = device_ids
+            print(f"vLLM {vllm.__version__} pinned to XPU device_ids={device_ids} (native)", flush=True)
         self._configure_vllm_env(version, vllm, kwargs.pop("full_determinism", False))
 
         # Execution mode mapping:
@@ -69,7 +77,15 @@ class RolloutRayActor:
         self._mm_pad_token_ids = mm_pad_token_ids
 
     def _configure_device_env(self, backend, bundle_indices, num_gpus):
-        if backend == "ray":
+        import torch
+
+        device_ids = None
+        if getattr(torch.version, "xpu", None):
+            os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
+            os.environ.pop("ZE_AFFINITY_MASK", None)
+            if backend != "ray":
+                device_ids = [int(g) for g in ray.get_gpu_ids()]
+        elif backend == "ray":
             # a hack to make the script work.
             # stop ray from manipulating *_VISIBLE_DEVICES
             # at the top-level when the distributed_executor_backend is ray.
@@ -86,6 +102,7 @@ class RolloutRayActor:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
             os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
             print(f"creating LLM with bundle_indices={bundle_indices}")
+        return device_ids
 
     def _configure_vllm_env(self, version, vllm, full_determinism: bool):
         assert version.parse(vllm.__version__) > version.parse(
@@ -159,6 +176,9 @@ class RolloutRayActor:
             from openrlhf.utils.vlm_utils import dedup_media_tokens
 
             prompt_token_ids = dedup_media_tokens(prompt_token_ids, self._mm_pad_token_ids)
+
+        from vllm.inputs import TokensPrompt
+        from vllm.utils import random_uuid
 
         prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
         if multi_modal_data:
@@ -291,6 +311,8 @@ def create_vllm_engines(
             actor_kwargs["limit_mm_per_prompt"] = {"image": max_images_per_prompt}
 
         if logprobs_mode:
+            import vllm
+
             actor_kwargs["logprobs_mode"] = logprobs_mode
             actor_kwargs["max_logprobs"] = 1
             assert version.parse(vllm.__version__) > version.parse(

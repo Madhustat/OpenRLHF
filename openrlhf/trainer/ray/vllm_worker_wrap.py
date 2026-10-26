@@ -11,6 +11,7 @@ class WorkerWrap:
 
         rank = torch.distributed.get_rank() + rank_offset
         self._model_update_with_ray = use_ray
+        self._sync_backend = backend
         if use_ray:
             import ray.util.collective as collective
 
@@ -23,11 +24,16 @@ class WorkerWrap:
                 rank,
                 world_size,
                 self.device,
+                backend=backend,
             )
         print(
             f"init_process_group: master_address={master_address}, master_port={master_port}, ",
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
+        if backend == "xccl":
+            from openrlhf.utils.distributed_util import xccl_preflight
+
+            return xccl_preflight(self._model_update_group, rank, self.device)
 
     def update_weight(self, name, dtype, shape, empty_cache=False):
         import torch
@@ -37,13 +43,14 @@ class WorkerWrap:
             print(f"update weight: {name}, dtype: {dtype}, shape: {shape}")
 
         assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-        weight = torch.empty(shape, dtype=dtype, device="cuda")
+        weight = torch.empty(shape, dtype=dtype, device=self.device)
         if self._model_update_with_ray:
             import ray.util.collective as collective
 
             collective.broadcast(weight, 0, group_name=self._model_update_group)
         else:
-            self._model_update_group.broadcast(weight, src=0, stream=torch.cuda.current_stream())
+            stream = torch.cuda.current_stream() if self._sync_backend == "nccl" else None
+            self._model_update_group.broadcast(weight, src=0, stream=stream)
 
         self.model_runner.model.load_weights(weights=[(name, weight)])
 

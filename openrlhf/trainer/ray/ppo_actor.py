@@ -1,3 +1,4 @@
+import faulthandler
 import os
 import socket
 from abc import ABC
@@ -22,7 +23,11 @@ from openrlhf.utils.deepspeed.deepspeed_utils import (
     offload_deepspeed_states,
     reload_deepspeed_states,
 )
-from openrlhf.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
+from openrlhf.utils.distributed_util import (
+    stateless_init_process_group,
+    torch_dist_barrier_and_cuda_sync,
+    xccl_preflight,
+)
 from openrlhf.utils.logging_utils import init_logger
 from openrlhf.utils.loss_utils import get_loss_batch_info, iter_grad_accum_global_norm
 from openrlhf.utils.vlm_utils import merge_mm_train_inputs
@@ -145,11 +150,32 @@ class ActorPPOTrainer(ABC):
             collective.init_collective_group(world_size=world_size, rank=0, backend=backend, group_name=group_name)
             self._model_update_group = group_name
         else:
+            accelerator = torch.accelerator.current_accelerator()
+            device = torch.device(accelerator.type, torch.accelerator.current_device_index())
             self._model_update_group = stateless_init_process_group(
-                master_address, master_port, 0, world_size, torch.cuda.current_device()
+                master_address, master_port, 0, world_size, device, backend=backend
             )
 
-        ray.get(refs)
+        if backend != "xccl":
+            ray.get(refs)
+            return
+        timeout = self.strategy.args.vllm.sync_timeout
+        logger.info(
+            f"Testing XCCL weight sync with a 128 MiB broadcast (a hang stops the job after {timeout} s; "
+            "then rerun with --vllm.sync_backend gloo)"
+        )
+        faulthandler.dump_traceback_later(timeout, exit=True)
+        try:
+            errors = [xccl_preflight(self._model_update_group, 0, device)]
+            errors += [error for engine_errors in ray.get(refs) for error in engine_errors]
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+        if any(errors):
+            raise RuntimeError(
+                f"XCCL weight sync failed its startup test: {[e for e in errors if e]}. "
+                "Rerun with --vllm.sync_backend gloo."
+            )
+        logger.info(f"XCCL weight-sync preflight passed on {world_size} ranks (128 MiB bit-exact)")
 
     def ppo_train(self, kl_ctl: float):
         # replay buffer may be empty at first, we should rebuild at each training
@@ -412,6 +438,7 @@ class ActorPPOTrainer(ABC):
         }
 
     def broadcast_to_vllm(self):
+        backend = getattr(self.strategy.args.vllm, "sync_backend", "nccl")
         use_prefix_cache = getattr(self.strategy.args.vllm, "enable_prefix_caching", False)
         cache_reset_refs = []
         if use_prefix_cache and torch.distributed.get_rank() == 0:
@@ -419,7 +446,7 @@ class ActorPPOTrainer(ABC):
             for engine in self.vllm_engines:
                 cache_reset_refs.append(engine.reset_prefix_cache.remote())
 
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         model = self.actor.model.module
         # TP gather always needs the top-level (possibly PeftModel) module.
         tp_model = model
@@ -428,6 +455,8 @@ class ActorPPOTrainer(ABC):
             use_ray = getattr(self.strategy.args.vllm, "sync_with_ray", False)
             # Fire all vllm engines for broadcast
             if torch.distributed.get_rank() == 0:
+                if backend == "xccl":
+                    faulthandler.dump_traceback_later(self.strategy.args.vllm.sync_timeout, exit=True)
                 shape = param.shape if self.strategy.args.ds.zero_stage != 3 else param.ds_shape
                 refs = [
                     engine.update_weight.remote(name, dtype=param.dtype, shape=shape, empty_cache=do_empty)
@@ -439,7 +468,8 @@ class ActorPPOTrainer(ABC):
 
                     collective.broadcast(param.data, 0, group_name=self._model_update_group)
                 else:
-                    self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                    stream = torch.cuda.current_stream() if backend == "nccl" else None
+                    self._model_update_group.broadcast(param.data, src=0, stream=stream)
                 ray.get(refs)
 
         def _handle_cuda_ipc(name, param, do_empty):
@@ -567,8 +597,9 @@ class ActorPPOTrainer(ABC):
 
         if cache_reset_refs:
             ray.get(cache_reset_refs)
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         torch_dist_barrier_and_cuda_sync()
+        faulthandler.cancel_dump_traceback_later()
 
     def _get_leaf_modules(self, root, use_lora):
         """Return (name, module) leaf modules for weight sync.
